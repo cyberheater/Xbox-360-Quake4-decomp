@@ -1,0 +1,768 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..1e07838 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -73,6 +73,11 @@ enum class GammaRampType {
+   kPWL,
+ };
+ 
++// Signalled by GraphicsSystem::MarkVblank right after the guest vblank interrupt callback has run.
++// WAIT_REG_MEM uses it to wake immediately instead of polling with a coarse sleep.
++void SignalVblankDispatched();
++void WaitForVblankDispatched(uint32_t timeout_ms);
++
+ class CommandProcessor {
+  public:
+   enum class SwapPostEffect {
+diff --git a/include/rex/platform/fpscr.h b/include/rex/platform/fpscr.h
+index c2c4fd4..290df4e 100644
+--- a/include/rex/platform/fpscr.h
++++ b/include/rex/platform/fpscr.h
+@@ -43,7 +43,7 @@ struct FPSCRPlatform {
+ 
+   static inline u32 getcsr() noexcept { return simde_mm_getcsr(); }
+ 
+-  static inline void setcsr(u32 csr) noexcept { simde_mm_setcsr(csr); }
++  static inline void setcsr(u32 csr) noexcept { simde_mm_setcsr(csr | ExceptionMask); }
+ 
+   static inline void InitHostExceptions(u32& csr) noexcept {
+     csr |= ExceptionMask;  // Set mask bits to disable exceptions
+diff --git a/include/rex/system/xtimer.h b/include/rex/system/xtimer.h
+index c7ce93f..b77443f 100644
+--- a/include/rex/system/xtimer.h
++++ b/include/rex/system/xtimer.h
+@@ -10,6 +10,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
++#include <thread>
+ #include <rex/system/xobject.h>
+ #include <rex/system/xtypes.h>
+ #include <rex/thread.h>
+@@ -18,6 +20,18 @@ namespace rex::system {
+ 
+ struct XDPC;
+ 
++// Called by the GPU emulation on every emulated guest vblank. Periodic ~60 Hz guest timers
++// (see XTimer::SetTimer) are driven from this so they never drift against the vblank.
++void NotifyGuestVblank();
++uint64_t GuestVblankCount();
++// steady_clock time (ns since epoch) of the most recent guest vblank.
++int64_t GuestVblankTimeNs();
++// Frames the guest has handed to the display (one per VdSwap); used by the FPS counter.
++void NotifyGuestFrame();
++uint64_t GuestFrameCount();
++// Blocks until the vblank counter is past `seen` (or the timeout elapses).
++void WaitGuestVblankPast(uint64_t seen, uint32_t timeout_ms);
++
+ struct X_KTIMER {
+   X_DISPATCH_HEADER header;         // 0x0
+   rex::be<uint64_t> due_time;       // 0x10
+@@ -41,12 +55,15 @@ class XTimer : public XObject {
+   X_STATUS SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine, uint32_t routine_arg,
+                     bool resume);
+   X_STATUS Cancel();
++  void StopServiceThread();
+ 
+  protected:
+   rex::thread::WaitHandle* GetWaitHandle() override { return timer_.get(); }
+ 
+  private:
+   std::unique_ptr<rex::thread::Timer> timer_;
++  std::thread svc_thread_;
++  std::atomic<bool> svc_stop_{false};
+ 
+   XThread* callback_thread_ = nullptr;
+   uint32_t callback_routine_ = 0;
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..c270717 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cinttypes>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <string_view>
+ 
+@@ -988,6 +989,17 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+   uint32_t wait = reader->ReadAndSwap<uint32_t>();
+ 
+   bool is_memory = (wait_info & 0x10) != 0;
++  {
++    // Experimental: skip the wait on this physical address (the guest "previous swap done" flag).
++    static const uint32_t skip_addr = [] {
++      const char* e = std::getenv("Q4_SWAP_SKIP_ADDR");
++      return e ? uint32_t(std::strtoul(e, nullptr, 16)) : 0u;
++    }();
++    if (skip_addr && is_memory && ref == 0 && (wait_info & 0x7) == 0x3 &&
++        (poll_reg_addr & ~uint32_t(0x3)) == (skip_addr & ~uint32_t(0x3))) {
++      return true;
++    }
++  }
+ 
+   bool matched = false;
+   do {
+@@ -1037,7 +1049,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+           // User wants it fast and dangerous.
+           rex::thread::MaybeYield();
+         } else {
+-          rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
++          // Wake as soon as the guest vblank interrupt has been serviced (it is usually what
++          // changes the value we wait for) rather than after a coarse 1 ms sleep.
++          WaitForVblankDispatched(wait / 0x100);
+         }
+         rex::thread::SyncMemory();
+         ReturnFromWait();
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..e3023da 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
++#include <rex/system/xtimer.h>
+ #include <rex/graphics/graphics_system.h>
+ 
+ #include <algorithm>
+@@ -31,9 +33,9 @@
+ #include <rex/ui/window.h>
+ #include <rex/ui/windowed_app_context.h>
+ 
+-REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
++REXCVAR_DEFINE_STRING(swap_post_effect, "fxaa", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
+     .allowed({"none", "fxaa", "fxaa_extreme"})
+-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
+ REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
+                     "Store shaders persistently and load them when loading games to avoid "
+@@ -58,6 +60,89 @@ rex::graphics::CommandProcessor::SwapPostEffect ParseSwapPostEffect(
+ }
+ }  // namespace
+ 
++#include <condition_variable>
++#include <mutex>
++#include <chrono>
++#include <rex/graphics/command_processor.h>
++
++#ifdef _WIN32
++#include <dxgi.h>
++#include <windows.h>
++
++namespace {
++// Waits on the real display's vertical blank so the emulated guest vblank can be phase-locked
++// to it. Without this the guest's frames arrive at an arbitrary, drifting phase relative to the
++// host display refresh, and whenever a frame lands close to a refresh boundary, timing jitter
++// makes the display show one frame twice and skip another (regular visible hitching).
++struct DisplayVBlank {
++  IDXGIFactory1* factory = nullptr;
++  IDXGIAdapter1* adapter = nullptr;
++  IDXGIOutput* output = nullptr;
++  int divisor = 1;
++  int count = 0;
++  double refresh_hz = 0.0;
++  ~DisplayVBlank() {
++    if (output) output->Release();
++    if (adapter) adapter->Release();
++    if (factory) factory->Release();
++  }
++  // guest_hz: the emulated console refresh (60). Succeeds only if the display refresh is
++  // (about) a whole multiple of it, e.g. 60, 120, 180 Hz.
++  bool Init(double guest_hz) {
++    HMODULE mod = LoadLibraryW(L"dxgi.dll");
++    if (!mod) return false;
++    using Fn = HRESULT(WINAPI*)(REFIID, void**);
++    auto fn = reinterpret_cast<Fn>(GetProcAddress(mod, "CreateDXGIFactory1"));
++    if (!fn || FAILED(fn(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) return false;
++    if (FAILED(factory->EnumAdapters1(0, &adapter))) return false;
++    if (FAILED(adapter->EnumOutputs(0, &output))) return false;
++    using clk = std::chrono::steady_clock;
++    if (FAILED(output->WaitForVBlank())) return false;
++    const auto t0 = clk::now();
++    constexpr int kSamples = 20;
++    for (int i = 0; i < kSamples; ++i) {
++      if (FAILED(output->WaitForVBlank())) return false;
++    }
++    refresh_hz = kSamples / std::chrono::duration<double>(clk::now() - t0).count();
++    const int div = static_cast<int>(refresh_hz / guest_hz + 0.5);
++    if (div < 1 || std::abs(refresh_hz / div - guest_hz) > guest_hz * 0.03) return false;
++    divisor = div;
++    return true;
++  }
++  // Blocks until the next guest tick (every `divisor` display vblanks).
++  bool WaitTick() {
++    do {
++      if (FAILED(output->WaitForVBlank())) return false;
++    } while (++count % divisor != 0);
++    return true;
++  }
++};
++}  // namespace
++#endif
++
++namespace rex::graphics {
++namespace {
++std::mutex g_vb_disp_mutex;
++std::condition_variable g_vb_disp_cv;
++uint64_t g_vb_disp_count = 0;
++}  // namespace
++
++void SignalVblankDispatched() {
++  {
++    std::lock_guard<std::mutex> lock(g_vb_disp_mutex);
++    ++g_vb_disp_count;
++  }
++  g_vb_disp_cv.notify_all();
++}
++
++void WaitForVblankDispatched(uint32_t timeout_ms) {
++  std::unique_lock<std::mutex> lock(g_vb_disp_mutex);
++  const uint64_t seen = g_vb_disp_count;
++  g_vb_disp_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
++                        [&] { return g_vb_disp_count != seen; });
++}
++}  // namespace rex::graphics
++
+ namespace rex::graphics {
+ 
+ // Nvidia Optimus/AMD PowerXpress support.
+@@ -158,7 +243,33 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
+         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
+         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
++#ifdef _WIN32
++        // Prefer ticking from the real display vblank (see DisplayVBlank above).
++        DisplayVBlank display_vblank;
++        bool use_display_vblank = REXCVAR_GET(vsync) && !std::getenv("Q4_NO_DISPLAY_VBLANK") &&
++                                  display_vblank.Init(refresh_rate_hz);
++        REXGPU_INFO("Guest vblank source: {}", use_display_vblank
++                                                    ? fmt::format("display vblank ({:.2f} Hz, every {} refresh)",
++                                                                  display_vblank.refresh_hz, display_vblank.divisor)
++                                                    : std::string("software timer"));
++#endif
+         while (vsync_worker_running_) {
++          // Apply anti-aliasing changes made while the game is running.
++          if (command_processor_) {
++            command_processor_->SetDesiredSwapPostEffect(
++                ParseSwapPostEffect(REXCVAR_GET(swap_post_effect)));
++          }
++#ifdef _WIN32
++          if (use_display_vblank && REXCVAR_GET(vsync)) {
++            if (display_vblank.WaitTick()) {
++              MarkVblank();
++              last_frame_time = chrono::Clock::QueryGuestTickCount();
++              continue;
++            }
++            use_display_vblank = false;  // output went away: fall back to the software timer
++            last_frame_time = chrono::Clock::QueryGuestTickCount();
++          }
++#endif
+           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+           uint64_t interval_ticks =
+               REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+@@ -166,7 +277,20 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             MarkVblank();
+             last_frame_time += interval_ticks;
+           }
+-          rex::thread::Sleep(std::chrono::milliseconds(1));
++          // Wait precisely for the next vblank. Polling with Sleep(1 ms) made vblanks arrive
++          // 15-18 ms apart, which the game turns into visible frame-time jitter and
++          // periodic double-length frames.
++          current_time = chrono::Clock::QueryGuestTickCount();
++          const uint64_t due = last_frame_time + interval_ticks;
++          if (current_time < due) {
++            const double remaining_ms =
++                1000.0 * double(due - current_time) / double(guest_tick_frequency);
++            if (remaining_ms > 1.6) {
++              rex::thread::Sleep(std::chrono::microseconds(int64_t((remaining_ms - 1.2) * 1000.0)));
++            } else {
++              rex::thread::MaybeYield();
++            }
++          }
+         }
+         return 0;
+       }));
+@@ -328,7 +452,9 @@ void GraphicsSystem::MarkVblank() {
+   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
+   //     something wrong and the CP will block waiting for code that
+   //     needs to be run in the interrupt.
++  rex::system::NotifyGuestVblank();
+   DispatchInterruptCallback(0, 2);
++  SignalVblankDispatched();
+ }
+ 
+ void GraphicsSystem::ClearCaches() {
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..4affd76 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -9,6 +9,11 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++#include <vector>
+ #include <algorithm>
+ #include <cmath>
+ 
+@@ -212,8 +217,78 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+ }
+ 
++
++// ---- Q4 input record/replay (env Q4_INPUT_RECORD=<file>, Q4_INPUT_REPLAY=<file>) ----
++namespace {
++struct Q4PadEv { long long ms; unsigned buttons, lt, rt; int lx, ly, rx, ry; };
++std::mutex g_q4_mu;
++std::vector<Q4PadEv> g_q4_replay;
++bool g_q4_loaded = false;
++FILE* g_q4_rec = nullptr;
++bool g_q4_rec_init = false;
++std::chrono::steady_clock::time_point g_q4_t0;
++bool g_q4_t0_set = false;
++Q4PadEv g_q4_last{-1, 0, 0, 0, 0, 0, 0, 0};
++
++long long Q4Elapsed() {
++  if (!g_q4_t0_set) { g_q4_t0 = std::chrono::steady_clock::now(); g_q4_t0_set = true; }
++  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_q4_t0).count();
++}
++// Returns true if state was replaced by replay.
++bool Q4Replay(uint32_t user_index, rex::input::X_INPUT_STATE* out) {
++  if (user_index != 0) return false;
++  const char* path = std::getenv("Q4_INPUT_REPLAY");
++  if (!path || !*path) return false;
++  std::lock_guard<std::mutex> lk(g_q4_mu);
++  if (!g_q4_loaded) {
++    g_q4_loaded = true;
++    if (FILE* f = std::fopen(path, "r")) {
++      Q4PadEv e;
++      while (std::fscanf(f, "%lld %u %u %u %d %d %d %d", &e.ms, &e.buttons, &e.lt, &e.rt, &e.lx, &e.ly, &e.rx, &e.ry) == 8)
++        g_q4_replay.push_back(e);
++      std::fclose(f);
++    }
++  }
++  long long now = Q4Elapsed();
++  Q4PadEv cur{0, 0, 0, 0, 0, 0, 0, 0};
++  for (const auto& e : g_q4_replay) { if (e.ms <= now) cur = e; else break; }
++  static uint32_t pkt = 0;
++  out->packet_number = ++pkt;
++  out->gamepad.buttons = (uint16_t)cur.buttons;
++  out->gamepad.left_trigger = (uint8_t)cur.lt;
++  out->gamepad.right_trigger = (uint8_t)cur.rt;
++  out->gamepad.thumb_lx = (int16_t)cur.lx;
++  out->gamepad.thumb_ly = (int16_t)cur.ly;
++  out->gamepad.thumb_rx = (int16_t)cur.rx;
++  out->gamepad.thumb_ry = (int16_t)cur.ry;
++  return true;
++}
++void Q4Record(uint32_t user_index, const rex::input::X_INPUT_STATE& st) {
++  if (user_index != 0) return;
++  std::lock_guard<std::mutex> lk(g_q4_mu);
++  if (!g_q4_rec_init) {
++    g_q4_rec_init = true;
++    const char* path = std::getenv("Q4_INPUT_RECORD");
++    if (path && *path) g_q4_rec = std::fopen(path, "w");
++  }
++  if (!g_q4_rec) return;
++  Q4PadEv e{Q4Elapsed(), (unsigned)(uint16_t)st.gamepad.buttons, st.gamepad.left_trigger, st.gamepad.right_trigger,
++            (int)(int16_t)st.gamepad.thumb_lx, (int)(int16_t)st.gamepad.thumb_ly,
++            (int)(int16_t)st.gamepad.thumb_rx, (int)(int16_t)st.gamepad.thumb_ry};
++  if (e.buttons == g_q4_last.buttons && e.lt == g_q4_last.lt && e.rt == g_q4_last.rt && e.lx == g_q4_last.lx &&
++      e.ly == g_q4_last.ly && e.rx == g_q4_last.rx && e.ry == g_q4_last.ry)
++    return;
++  g_q4_last = e;
++  std::fprintf(g_q4_rec, "%lld %u %u %u %d %d %d %d\n", e.ms, e.buttons, e.lt, e.rt, e.lx, e.ly, e.rx, e.ry);
++  std::fflush(g_q4_rec);
++}
++}  // namespace
++
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++  if (out_state && Q4Replay(user_index, out_state)) {
++    return X_ERROR_SUCCESS;
++  }
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -247,6 +322,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   }
+   if (out_state) {
+     *out_state = merged;
++    Q4Record(user_index, merged);
+   }
+   return X_ERROR_SUCCESS;
+ }
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+index 1254710..69fd142 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+@@ -12,6 +12,10 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <thread>
++#include <chrono>
++#include <cstdlib>
++#include <rex/system/xtimer.h>
+ #include <algorithm>
+ #include <atomic>
+ #include <string>
+@@ -453,6 +457,53 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
+   assert(width);
+   assert(height);
+ 
++  {
++    // When the command processor is told not to hold swaps for the vblank (Q4_SWAP_SKIP_ADDR),
++    // cap the swap rate here instead: at most one swap per emulated vblank. This blocks the
++    // game thread, not the command processor, so GPU fences keep resolving immediately.
++    static const bool pace = std::getenv("Q4_SWAP_SKIP_ADDR") != nullptr;
++    static uint64_t last_swap_vblank = 0;
++    if (pace) {
++      uint64_t cur = rex::system::GuestVblankCount();
++      bool waited = false;
++      if (cur <= last_swap_vblank) {
++        rex::system::WaitGuestVblankPast(last_swap_vblank, 50);
++        cur = rex::system::GuestVblankCount();
++        waited = true;
++      }
++      last_swap_vblank = cur;
++      // The frame is handed to the presenter right after this. When we have just waited for a
++      // vblank that is locked to the display's, doing it immediately would land every frame
++      // exactly on the display's own paint tick, where timing jitter decides whether it makes
++      // that refresh (visible repeated/skipped frames). Hold the frame back so it arrives
++      // mid-interval instead, with margin before the next display tick. Only when we were early.
++      static const double phase_ms = [] {
++        const char* e = std::getenv("Q4_SWAP_PHASE_MS");
++        return e ? std::atof(e) : 8.0;
++      }();
++      // Hold every frame until a fixed point after the latest vblank (not only frames that
++      // were early), so frames reach the presenter at an even cadence regardless of how long
++      // the game took to render them. Frames that are already later than that go out at once.
++      (void)waited;
++      if (phase_ms > 0.0) {
++        const int64_t vb_ns = rex::system::GuestVblankTimeNs();
++        const int64_t target_ns = vb_ns + static_cast<int64_t>(phase_ms * 1e6);
++        auto now_ns = [] {
++          return std::chrono::duration_cast<std::chrono::nanoseconds>(
++                     std::chrono::steady_clock::now().time_since_epoch()).count();
++        };
++        int64_t remain = target_ns - now_ns();
++        if (remain > 0 && remain < 20000000) {  // never hold more than 20 ms
++          if (remain > 1500000) {
++            std::this_thread::sleep_for(std::chrono::nanoseconds(remain - 1000000));
++          }
++          while (now_ns() < target_ns) {
++          }
++        }
++      }
++    }
++  }
++  rex::system::NotifyGuestFrame();
+   namespace xenos = rex::graphics::xenos;
+ 
+   xenos::xe_gpu_texture_fetch_t gpu_fetch;
+diff --git a/src/system/runtime.cpp b/src/system/runtime.cpp
+index c10694c..def6ad6 100644
+--- a/src/system/runtime.cpp
++++ b/src/system/runtime.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
++#include <rex/filesystem/devices/disc_image_device.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/null_device.h>
+ #include <rex/filesystem/vfs.h>
+@@ -305,14 +306,21 @@ bool Runtime::SetupVfs() {
+ 
+   // Mount game_data_root as \Device\Harddisk0\Partition1
+   auto mount_path = "\\Device\\Harddisk0\\Partition1";
+-  auto device = std::make_unique<rex::filesystem::HostPathDevice>(
+-      mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
++  std::unique_ptr<rex::filesystem::Device> device;
++  if (std::filesystem::is_regular_file(abs_game_root)) {
++    // A disc image (.iso): read the game straight from it.
++    device = std::make_unique<rex::filesystem::DiscImageDevice>(mount_path, abs_game_root);
++  } else {
++    device = std::make_unique<rex::filesystem::HostPathDevice>(
++        mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
++  }
+   if (!device->Initialize()) {
+-    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize host path device");
++    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize game device for {}",
++                 abs_game_root.string());
+     return false;
+   }
+   if (!file_system_->RegisterDevice(std::move(device))) {
+-    REXSYS_ERROR("Runtime::SetupVfs: Failed to register host path device");
++    REXSYS_ERROR("Runtime::SetupVfs: Failed to register game device");
+     return false;
+   }
+   REXSYS_DEBUG("  Mounted {} at {}", abs_game_root.string(), mount_path);
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 2d13ac8..b94a3dd 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/cvar.h>
+ #include <cstring>
+ 
+ #include <rex/kernel/xam/module.h>
+@@ -109,8 +110,23 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+   return X_STATUS_SUCCESS;
+ }
+ 
++REXCVAR_DEFINE_BOOL(net_bind_loopback_only, false, "Network",
++                    "Bind the emulated console's sockets to 127.0.0.1 only. Stops Windows Firewall "
++                    "prompting for single-player titles that open a LAN/system-link socket at startup, "
++                    "at the cost of LAN play.");
++
+ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
+-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
++  const sockaddr* bind_addr = reinterpret_cast<const sockaddr*>(name);
++  int bind_len = name_len;
++  sockaddr_in loopback_addr = {};
++  if (REXCVAR_GET(net_bind_loopback_only) && name_len >= static_cast<int>(sizeof(sockaddr_in))) {
++    std::memcpy(&loopback_addr, name, sizeof(sockaddr_in));
++    loopback_addr.sin_family = AF_INET;
++    loopback_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    bind_addr = reinterpret_cast<const sockaddr*>(&loopback_addr);
++    bind_len = static_cast<int>(sizeof(sockaddr_in));
++  }
++  int ret = bind(native_handle_, bind_addr, bind_len);
+   if (ret < 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+diff --git a/src/system/xtimer.cpp b/src/system/xtimer.cpp
+index eabf0ae..c1c363a 100644
+--- a/src/system/xtimer.cpp
++++ b/src/system/xtimer.cpp
+@@ -9,7 +9,13 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdlib>
++#include <mutex>
+ #include <rex/chrono/chrono.h>
++#include <rex/cvar.h>
+ #include <rex/chrono/clock.h>
+ #include <rex/logging.h>
+ #include <rex/system/xthread.h>
+@@ -17,9 +23,54 @@
+ 
+ namespace rex::system {
+ 
++namespace {
++std::mutex g_vblank_mutex;
++std::condition_variable g_vblank_cv;
++uint64_t g_vblank_count = 0;
++std::atomic<int64_t> g_vblank_time_ns{0};
++std::atomic<uint64_t> g_guest_frames{0};
++}  // namespace
++
++void NotifyGuestFrame() { g_guest_frames.fetch_add(1, std::memory_order_relaxed); }
++uint64_t GuestFrameCount() { return g_guest_frames.load(std::memory_order_relaxed); }
++
++int64_t GuestVblankTimeNs() { return g_vblank_time_ns.load(std::memory_order_relaxed); }
++
++uint64_t GuestVblankCount() {
++  std::lock_guard<std::mutex> lock(g_vblank_mutex);
++  return g_vblank_count;
++}
++
++void WaitGuestVblankPast(uint64_t seen, uint32_t timeout_ms) {
++  std::unique_lock<std::mutex> lock(g_vblank_mutex);
++  g_vblank_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
++                       [&] { return g_vblank_count > seen; });
++}
++
++void NotifyGuestVblank() {
++  g_vblank_time_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
++      std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
++  {
++    std::lock_guard<std::mutex> lock(g_vblank_mutex);
++    ++g_vblank_count;
++  }
++  g_vblank_cv.notify_all();
++}
++
+ XTimer::XTimer(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
+ 
+-XTimer::~XTimer() = default;
++XTimer::~XTimer() {
++  StopServiceThread();
++}
++
++void XTimer::StopServiceThread() {
++  svc_stop_ = true;
++  g_vblank_cv.notify_all();
++  if (svc_thread_.joinable()) {
++    svc_thread_.join();
++  }
++  svc_stop_ = false;
++}
+ 
+ void XTimer::Initialize(uint32_t timer_type) {
+   assert_false(timer_);
+@@ -41,11 +92,11 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine
+                           uint32_t routine_arg, bool resume) {
+   using rex::chrono::WinSystemClock;
+   using rex::chrono::XSystemClock;
+-  // Caller is checking for STATUS_TIMER_RESUME_IGNORED.
+-  if (resume) {
+-    return X_STATUS_TIMER_RESUME_IGNORED;
+-  }
++  // The "resume" flag only asks to wake the system from suspend; it must not stop the
++  // timer being armed. Return STATUS_TIMER_RESUME_IGNORED (as the Xbox 360 kernel does)
++  // after arming it. Returning early left timers such as Quake 4's 16 ms tick dead.
+ 
++  const uint32_t raw_period_ms = period_ms;
+   period_ms = chrono::Clock::ScaleGuestDurationMillis(period_ms);
+   WinSystemClock::time_point due_tp;
+   if (due_time < 0) {
+@@ -77,6 +128,50 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine
+     };
+   }
+ 
++  StopServiceThread();
++  // Quake 4 requests a 16 ms periodic timer as its "60 Hz" game tick and also paces swaps on
++  // the guest vblank (60.00 Hz). Run independently, a 16 ms (62.5 Hz) timer and the vblank beat
++  // against each other, so every ~24 frames one frame waits a whole extra vblank (a 33 ms frame
++  // followed by a 3 ms one). Fire the timer from the emulated vblank instead.
++  if (raw_period_ms == 16 && !callback_routine_ && !std::getenv("Q4_NO_VBLANK_TICK")) {
++    svc_thread_ = std::thread([this]() {
++      using clk = std::chrono::steady_clock;
++      uint64_t seen;
++      {
++        std::lock_guard<std::mutex> lock(g_vblank_mutex);
++        seen = g_vblank_count;
++      }
++      auto last_tick = clk::now() - std::chrono::milliseconds(100);
++      auto next_tick = clk::now();
++      while (!svc_stop_) {
++        bool got;
++        {
++          std::unique_lock<std::mutex> lock(g_vblank_mutex);
++          got = g_vblank_cv.wait_for(lock, std::chrono::milliseconds(40),
++                                     [&] { return g_vblank_count != seen || svc_stop_; });
++          if (svc_stop_) break;
++          seen = g_vblank_count;
++        }
++        const auto now = clk::now();
++        constexpr auto kTickPeriod = std::chrono::nanoseconds(16666667);  // exactly 1/60 s
++        if (rex::cvar::GetFlagByName("vsync") == "true") {
++          // One tick per display-locked vblank.
++          next_tick = now + kTickPeriod;
++        } else if (got) {
++          // V-sync off: the vblank source runs far faster than 60 Hz, so tick on a fixed 1/60 s
++          // schedule instead. (A plain "at least 15.5 ms since the last tick" gate fires every
++          // 16 ms = 62.5 Hz and makes the game run about 4% fast.)
++          if (now < next_tick) continue;
++          next_tick += kTickPeriod;
++          if (now - next_tick > std::chrono::milliseconds(100)) next_tick = now + kTickPeriod;
++        }
++        last_tick = now;
++        timer_->SetOnceAfter(rex::chrono::hundrednanoseconds(0), nullptr);
++      }
++    });
++    return resume ? X_STATUS_TIMER_RESUME_IGNORED : X_STATUS_SUCCESS;
++  }
++
+   bool result;
+   if (!period_ms) {
+     result = timer_->SetOnceAt(due_tp, std::move(callback));
+@@ -85,10 +180,14 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine
+         timer_->SetRepeatingAt(due_tp, std::chrono::milliseconds(period_ms), std::move(callback));
+   }
+ 
+-  return result ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
++  if (!result) {
++    return X_STATUS_UNSUCCESSFUL;
++  }
++  return resume ? X_STATUS_TIMER_RESUME_IGNORED : X_STATUS_SUCCESS;
+ }
+ 
+ X_STATUS XTimer::Cancel() {
++  StopServiceThread();
+   return timer_->Cancel() ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+ }
+ 
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..26a055f 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -51,6 +51,10 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+                       "GPU emulation")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
++                      "Graphics backend inside the GPU plugin: 'd3d12', 'vulkan' or 'any' (D3D12 first)")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
+ namespace rex {
+ 
+ // --- ReXApp ---
+@@ -207,7 +211,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+     return false;
+   }
+-  if (!std::filesystem::is_directory(paths.game_data_root)) {
++  // game_data_root is either an extracted game folder or a disc image (.iso) file.
++  if (!std::filesystem::is_directory(paths.game_data_root) &&
++      !std::filesystem::is_regular_file(paths.game_data_root)) {
+     auto msg = fmt::format("--game_data_root does not exist: {}", paths.game_data_root.string());
+     REXLOG_ERROR("{}", msg);
+     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+@@ -275,7 +281,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+     std::string host_tail{tail};
+     std::replace(host_tail.begin(), host_tail.end(), '\\', '/');
+     auto xex_host = paths.game_data_root / host_tail;
+-    if (!std::filesystem::is_regular_file(xex_host)) {
++    // When playing from a disc image the XEX lives inside the image, not on the host.
++    const bool from_disc_image = std::filesystem::is_regular_file(paths.game_data_root);
++    if (!from_disc_image && !std::filesystem::is_regular_file(xex_host)) {
+       auto msg = fmt::format("Entrypoint XEX not found: {}", xex_host.string());
+       REXLOG_ERROR("{}", msg);
+       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+@@ -314,7 +322,7 @@ bool ReXApp::SetupPresentation() {
+   OnPreSetup(config_);
+ 
+   if (!config_.graphics && !config_.gpu_plugin.empty()) {
+-    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin);
++    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin, REXCVAR_GET(gpu_backend));
+     if (!config_.graphics) {
+       // Fatal by design: no silent headless fallback.
+       auto msg =
+diff --git a/src/ui/window.cpp b/src/ui/window.cpp
+index b4e045f..1037250 100644
+--- a/src/ui/window.cpp
++++ b/src/ui/window.cpp
+@@ -21,12 +21,12 @@
+ 
+ #include <imgui.h>
+ 
+-REXCVAR_DEFINE_INT32(window_width, 0, "UI/Window",
++REXCVAR_DEFINE_INT32(window_width, 1920, "UI/Window",
+                      "Startup window width in logical pixels (0 = use app default)")
+     .range(0, 8192)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+-REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
++REXCVAR_DEFINE_INT32(window_height, 1080, "UI/Window",
+                      "Startup window height in logical pixels (0 = use app default)")
+     .range(0, 8192)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);

@@ -1,0 +1,33 @@
+# Never commit game files or anything derived from them. Bring your own copy of Quake 4.
+*.iso
+*.xex
+*.xbe
+*.pk4
+*.xpr
+*.xma
+*.bik
+*.wmv
+assets/
+game/
+dump/
+save/
+save_backup/
+shadercache/
+cache/
+
+# Recompiled game code generated from your own copy of the game
+generated/default/
+generated/*.stamp
+ppc/
+**/ppc_recomp*.cpp
+
+# Build output / local state
+out/
+build/
+*.obj
+*.pdb
+*.exe
+*.dll
+*.log
+*.toml.bak
+q4.toml

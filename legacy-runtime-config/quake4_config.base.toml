@@ -1,0 +1,14 @@
+[main]
+file_path = "../game/default.xex"
+out_directory_path = "../ppc"
+switch_table_file_path = "switch_tables.toml"
+
+# Compiler register save/restore helpers (found by instruction signature scan of .text)
+savegprlr_14_address = 0x82844960
+restgprlr_14_address = 0x828449B0
+savefpr_14_address   = 0x828451F0
+restfpr_14_address   = 0x8284523C
+savevmx_14_address   = 0x828454E0
+restvmx_14_address   = 0x82845778
+savevmx_64_address   = 0x82845574
+restvmx_64_address   = 0x8284580C

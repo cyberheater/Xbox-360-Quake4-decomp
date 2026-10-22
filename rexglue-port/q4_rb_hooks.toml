@@ -1,0 +1,126 @@
+# q4 - mid-function hooks for the renderer back-end thread (q4hle, src/hle/rb_thread.cpp).
+# They do nothing unless the back end runs on its own thread.
+
+# idRenderModelOverlay::AddOverlaySurfacesToModel (0x82241550): when the overlay surface is big
+# enough it is rebuilt in place (R_FreeStaticTriSurfVertexCaches, then new vertices and caches),
+# while the back end may still be drawing it. With the back-end thread, take the other branch:
+# free the old surface (deferred) and build a new one.
+[[midasm_hook]]
+address = 0x82241738
+name = "Q4Rb_OverlayRealloc"
+jump_address_on_true = 0x82241740
+
+# Front-end helper threads (rb_thread.cpp, "front-end helpers"): the shadow volume code keeps its
+# working state (shadow index buffer, counters, scratch pointers) in static variables at
+# 0x82FE7928-0x8300FA00. After each `lis` that forms the base address of that block in those
+# functions, a helper thread rebases the register onto its own copy of the block, so several
+# threads can build shadow volumes at once. On any other thread the delta is 0. Sites found by
+# tools/gen_fe_hooks.py (every use of each base register stays inside the block).
+
+[[midasm_hook]]
+address = 0x8229E5BC
+name = "Q4Fe_Rebase_r9"
+registers = ["r9"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229EB58
+name = "Q4Fe_Rebase_r10"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229ECB0
+name = "Q4Fe_Rebase_r10"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229EF00
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229EF30
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229EF44
+name = "Q4Fe_Rebase_r10"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229F460
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229F46C
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229F808
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229FAF4
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229FB04
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229FE1C
+name = "Q4Fe_Rebase_r10"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229FF68
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8229FFA0
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x822A0780
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x822A07A0
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x822A7758
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x822A7774
+name = "Q4Fe_Rebase_r11"
+registers = ["r11"]
+after_instruction = true

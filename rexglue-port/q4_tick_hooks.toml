@@ -1,0 +1,479 @@
+# q4 - mid-function hooks for running the game at 120 tics per second (see src/q4_tick.h).
+# Every hook is a no-op at the default 60 Hz.
+
+[[midasm_hook]]
+address = 0x8216EBD4
+name = "Q4Tick_Probe"
+registers = ["r3"]
+
+# ===== group: ai =====
+# Implementations: hooks_ai.cpp. Every hook is a no-op at 60 Hz.
+# --- #2 AI complex-think round-robin (AI_Manager.cpp:47, AI_Manager.cpp:327-347 inlined in idAI::Think) ---
+# rvAIManager::RunFrame (0x8249E5A0): skip "simpleThink.Next()->simpleThinkNode.Remove()" on tics
+# that do not end a 16 ms step.
+
+[[midasm_hook]]
+address = 0x8249E608
+name = "Q4Tick_AIRoundRobinPop"
+registers = ["r22"]
+jump_address_on_true = 0x8249E650
+# idAI::Think (0x82527590), inlined IsSimpleThink: "head of list -> complex think" path (li r11,0).
+# Force simple think on tics that do not end a 16 ms step.
+
+[[midasm_hook]]
+address = 0x82527678
+name = "Q4Tick_AIForceSimpleThink"
+registers = ["r11"]
+after_instruction = true
+# --- #8 idActor::DeathPush (0x8247EF38), Actor.cpp:2604-2608: deathPushForce impulse per frame ---
+
+[[midasm_hook]]
+address = 0x8247F0C0
+name = "Q4Tick_DeathPushForce"
+registers = ["r1", "r6"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8247F0E8
+name = "Q4Tick_DeathPushForce"
+registers = ["r1", "r6"]
+after_instruction = true
+# --- #4 rvMonsterLightTank::State_Torso_PowerUp (0x8259C9D0), Monster_LightTank.cpp:594 health++ ---
+
+[[midasm_hook]]
+address = 0x8259CAF4
+name = "Q4Tick_LightTankPowerUpHealth"
+registers = ["r8", "r11"]
+after_instruction = true
+# --- #12 idAI::UpdateEnemy (0x82529F10), AI.cpp:2078-2082 smoothVelocityRate (enemy+0x1FCC) ---
+
+[[midasm_hook]]
+address = 0x8252A2B4
+name = "Q4Tick_AIEnemyVelSmooth"
+registers = ["f0"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8252A340
+name = "Q4Tick_AIEnemyVelSmooth"
+registers = ["f0"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8252A394
+name = "Q4Tick_AIEnemyVelSmooth"
+registers = ["f0"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8252A3E4
+name = "Q4Tick_AIEnemyVelSmooth"
+registers = ["f0"]
+after_instruction = true
+# --- idAI::UpdateAnimationControllers (0x8252D8B8) ---
+# AI.cpp:3151/3216-3224 currentHeadFocusRate (f25), join point after both computations.
+
+[[midasm_hook]]
+address = 0x8252D900
+name = "Q4Tick_AIHeadFocusRate"
+registers = ["f25"]
+# AI.cpp:3286 look-joint blend back "curJointAngleMod *= 0.75f" (f31 = 0.75 constant, loop invariant).
+
+[[midasm_hook]]
+address = 0x8252DFE0
+name = "Q4Tick_AILookJointBlendBack"
+registers = ["f31"]
+after_instruction = true
+# --- idAI::AdjustFlyingAngles (0x824A8D38), AI_Move.cpp:2269-2270 fly_roll/fly_pitch 0.95/0.05 ---
+
+[[midasm_hook]]
+address = 0x824A8E58
+name = "Q4Tick_AIFlyBank"
+registers = ["f12", "f13"]
+after_instruction = true
+# --- #13 rvMonsterConvoyHover::Think (0x8257ACC8), Monster_ConvoyHover.cpp:244-299 ---
+# On tics that do not end a 16 ms step, take the "no driver" path: rvVehicleMonster::Think and return.
+
+[[midasm_hook]]
+address = 0x8257AD34
+name = "Q4Tick_ConvoyHoverSkipTic"
+registers = ["r31"]
+jump_address_on_true = 0x8257AD18
+# --- rvMonsterStroggHover::State_Torso_BombAttack (0x825B61A8), Monster_StroggHover.cpp:1064 vel.z += 20 ---
+
+[[midasm_hook]]
+address = 0x825B6214
+name = "Q4Tick_StroggHoverBombClimb"
+registers = ["f0"]
+after_instruction = true
+# --- rvMonsterStroggHover::State_DeathSpiral (0x825B7570), STAGE_SPIRAL, Monster_StroggHover.cpp:1420-1440 ---
+# Per-frame steps scaled by msec/16 (review fix: skipping the stage left viewAxis level every other tic).
+# yaw step (+-deathYawRate) at the join point, before fadds f0,f0,f9.
+
+[[midasm_hook]]
+address = 0x825B75B8
+name = "Q4Tick_StroggHoverDeathSpiralStep"
+registers = ["f0"]
+# pitch step: after lfs f13,10092(r31) (deathPitchRate).
+
+[[midasm_hook]]
+address = 0x825B75C0
+name = "Q4Tick_StroggHoverDeathSpiralStep"
+registers = ["f13"]
+after_instruction = true
+# roll step (+-deathRollRate) at the join point, before lfs f5 / fadds f0,f5,f12.
+
+[[midasm_hook]]
+address = 0x825B761C
+name = "Q4Tick_StroggHoverDeathSpiralStep"
+registers = ["f12"]
+# frequencyShift += 0.025: after lfs f0,-21584(r11).
+
+[[midasm_hook]]
+address = 0x825B77E0
+name = "Q4Tick_StroggHoverDeathSpiralStep"
+registers = ["f0"]
+after_instruction = true
+# --- rvAIMedic::State_Medic (0x8253B3C0, labelled CLASS_STATES_DECLARATION), AI_Medic.cpp:806-818 ---
+# 50% roll passed -> health++/armor++; on tics that do not end a 16 ms step go to "return SRESULT_WAIT".
+
+[[midasm_hook]]
+address = 0x8253BB14
+name = "Q4Tick_MedicHealTick"
+registers = ["r31"]
+jump_address_on_true = 0x8253BC44
+# --- idPlayer::Think (0x823C3E78), Player.cpp:9515 dynamicProtectionScale += 0.05f ---
+
+[[midasm_hook]]
+address = 0x823C4754
+name = "Q4Tick_DynamicProtectionRecover"
+registers = ["f0"]
+after_instruction = true
+# --- rvMonsterConvoyGround::State_Legs_Move (0x8255D620), Monster_ConvoyGround.cpp:591 moveAccelRate ---
+
+[[midasm_hook]]
+address = 0x8255D804
+name = "Q4Tick_ConvoyGroundAnimRate"
+registers = ["f12"]
+after_instruction = true
+
+# ===== group: phys =====
+# q4 - 120 Hz tic fixes: player / physics / vehicle ("phys" group). See hooks_phys.cpp.
+# --- Vehicles ---------------------------------------------------------------------------------
+# rvVehicleTurret::RunPostPhysics: hull alignment step per frame (VehicleParts.cpp:1653-1658)
+# Review fix: scale deg = Clamp(0, alignment_delta, acos) * power (after fmuls f0,f0,f31), not just the
+# clamp limit, so the near-aligned proportional regime is also per tic.
+
+[[midasm_hook]]
+address = 0x82569534
+name = "Q4Tick_TurretAlignDelta"
+registers = ["f0"]
+after_instruction = true
+# rvVehicleWalker::HandleStrafing: strafe_delta per frame (Vehicle_Walker.cpp:162-168)
+
+[[midasm_hook]]
+address = 0x825B91A4
+name = "Q4Tick_WalkerStrafeRight"
+registers = ["f13", "f9", "f7"]
+
+[[midasm_hook]]
+address = 0x825B91FC
+name = "Q4Tick_WalkerStrafeLeft"
+registers = ["f4", "f0", "f12"]
+# rvVehicleWalker::Think: stomp threshold / RadiusDamage per frame (Vehicle_Walker.cpp:86-90)
+
+[[midasm_hook]]
+address = 0x825B8DC4
+name = "Q4Tick_WalkerStomp"
+registers = ["f10"]
+# rvVehicleHoverpad::RunPhysics: damping impulse per frame (VehicleParts.cpp:1934-1935)
+
+[[midasm_hook]]
+address = 0x8256AE74
+name = "Q4Tick_HoverpadDampen"
+registers = ["f4"]
+after_instruction = true
+# rvVehicleThruster::RunPhysics: fixed impulse per frame (VehicleParts.cpp:2223)
+
+[[midasm_hook]]
+address = 0x8256CD08
+name = "Q4Tick_ThrusterForce"
+registers = ["f0"]
+after_instruction = true
+# --- Player -----------------------------------------------------------------------------------
+# idPlayer::Move: crouch eye-height smoothing (Player.cpp:9031)
+
+[[midasm_hook]]
+address = 0x823C3028
+name = "Q4Tick_CrouchRate"
+registers = ["f0"]
+# idPlayer::Move: standing on a monster, vel *= 1.1 per frame (Player.cpp:9059)
+
+[[midasm_hook]]
+address = 0x823C3278
+name = "Q4Tick_MonsterPush"
+registers = ["f0"]
+# idPlayer::UpdateViewAngles: INFLUENCE_LEVEL3 1 deg/frame clamp (Player.cpp:7787)
+
+[[midasm_hook]]
+address = 0x823C01C0
+name = "Q4Tick_InfluenceViewClamp"
+registers = ["f0", "f1"]
+# idPlayer::UpdateAir: airTics-- / airTics += 2 per frame (Player.cpp:7866, 7886)
+
+[[midasm_hook]]
+address = 0x823C0524
+name = "Q4Tick_AirLose"
+registers = ["r6"]
+
+[[midasm_hook]]
+address = 0x823C068C
+name = "Q4Tick_AirRegain"
+registers = ["r11"]
+# idPlayer::GunTurningOffset (inlined): 10-frame view-angle average (Player.cpp:10506-10533)
+
+[[midasm_hook]]
+address = 0x823C7418
+name = "Q4Tick_GunTurningAverages"
+registers = ["r7"]
+after_instruction = true
+# idPlayer::UpdateIntentDir -> BiasIntentDir prevBias (Player.cpp:9124-9143)
+
+[[midasm_hook]]
+address = 0x823C3718
+name = "Q4Tick_IntentDirBias"
+registers = ["f1"]
+after_instruction = true
+# idPlayer legs: legsYaw = legsYaw*0.9 + ideal*0.1 per frame (Player.cpp:8829)
+
+[[midasm_hook]]
+address = 0x823C2678
+name = "Q4Tick_LegsYawBlend"
+registers = ["f0", "f10", "f11"]
+# --- Physics ----------------------------------------------------------------------------------
+# idPhysics_Player::SlideMove: push velocity factor per frame (Physics_Player.cpp:301)
+
+[[midasm_hook]]
+address = 0x825119F4
+name = "Q4Tick_PushVelocityFactor"
+registers = ["f0"]
+after_instruction = true
+# idPhysics_RigidBody::ContactFriction: contactFriction fraction per step (Physics_RigidBody.cpp:235)
+
+[[midasm_hook]]
+address = 0x8242D86C
+name = "Q4Tick_RigidBodyContactFriction"
+registers = ["f17"]
+# idPhysics_AF::Evolve: max velocity caps (Physics_AF.cpp:5328-5329)
+
+[[midasm_hook]]
+address = 0x82422DC0
+name = "Q4Tick_AFMaxVelocity"
+registers = ["f30", "f29"]
+after_instruction = true
+# idPhysics_AF::Evolve: linear / angular friction per step (Physics_AF.cpp:5376-5377)
+
+[[midasm_hook]]
+address = 0x82423168
+name = "Q4Tick_AFLinearFriction"
+registers = ["f0"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x824231D0
+name = "Q4Tick_AFAngularFriction"
+registers = ["f0"]
+after_instruction = true
+# idForce_Field::Evaluate: FORCEFIELD_APPLY_IMPULSE magnitude per frame (Force_Field.cpp:251-258)
+
+[[midasm_hook]]
+address = 0x82594E50
+name = "Q4Tick_ForceFieldImpulse"
+registers = ["f0"]
+after_instruction = true
+
+# ===== group: engine =====
+# playback blend-in, controller look smoothing. Implementations: hooks_engine.cpp.
+# Every hook is a no-op at 60 Hz.
+# --- Audit #9: weapon refire intervals keep their 60 Hz 16 ms quantisation ---------------------
+# rvWeaponMachinegun::State_Fire: nextAttackTime (fire / alt fire)
+
+[[midasm_hook]]
+address = 0x8256E5CC
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r9"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8256E6D4
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r11"]
+after_instruction = true
+# rvWeaponRocketLauncher::State_Fire
+
+[[midasm_hook]]
+address = 0x82589C80
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r11"]
+after_instruction = true
+# rvWeaponGrenadeLauncher::State_Fire
+
+[[midasm_hook]]
+address = 0x8258F960
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r10"]
+after_instruction = true
+# rvWeaponNailgun::State_Fire (two rates)
+
+[[midasm_hook]]
+address = 0x8259241C
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r4"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82592500
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r4"]
+after_instruction = true
+# rvWeaponShotgun::State_Fire
+
+[[midasm_hook]]
+address = 0x8259ECC0
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r8"]
+after_instruction = true
+# rvWeaponHyperblaster::State_Fire
+
+[[midasm_hook]]
+address = 0x825AF72C
+name = "Q4Tick_WeaponNextAttackGE"
+registers = ["r10"]
+after_instruction = true
+# rvWeaponDarkMatterGun::State_Fire (re-fire tested with ">" only in SP)
+
+[[midasm_hook]]
+address = 0x82576390
+name = "Q4Tick_WeaponNextAttackGT"
+registers = ["r9"]
+after_instruction = true
+# rvWeaponRailgun::State_Fire (re-fire tested with ">" only in SP)
+
+[[midasm_hook]]
+address = 0x8259E320
+name = "Q4Tick_WeaponNextAttackGT"
+registers = ["r9"]
+after_instruction = true
+# rvWeaponBlaster::UpdateAttack (stfiwx f6,r31,r12 with r12 = 204)
+
+[[midasm_hook]]
+address = 0x825837B0
+name = "Q4Tick_WeaponNextAttackGE_R31"
+registers = ["r31"]
+after_instruction = true
+# rvWeaponLightningGun::Think (damage tick; stfiwx f13,r31,r12 with r12 = 204)
+
+[[midasm_hook]]
+address = 0x825856BC
+name = "Q4Tick_WeaponNextAttackGE_R31"
+registers = ["r31"]
+after_instruction = true
+# rvWeaponGauntlet blade damage (stw r8,204(r31); tested with ">")
+
+[[midasm_hook]]
+address = 0x82556694
+name = "Q4Tick_GauntletNextAttack"
+registers = ["r31"]
+after_instruction = true
+# rvWeaponBlaster::UpdateAttack: "time - fireHeldTime > chargeDelay" (before cmpw r9,r10)
+
+[[midasm_hook]]
+address = 0x8258381C
+name = "Q4Tick_BlasterChargeDelay"
+registers = ["r10"]
+# rvWeaponBlaster::State_Fire: "time - fireHeldTime > chargeTime" (before cmpw r4,r8)
+
+[[midasm_hook]]
+address = 0x82584468
+name = "Q4Tick_BlasterChargedShot"
+registers = ["r8"]
+# rvDarkMatterProjectile::Think: nextDamageTime (before stw r4,1504(r31); r11 = time)
+
+[[midasm_hook]]
+address = 0x82576A08
+name = "Q4Tick_DarkMatterDamageRate"
+registers = ["r4", "r11"]
+# rvVehicleWeapon::RunPostPhysics: nextFireTime (before stw r4,144(r31); r11 = time)
+
+[[midasm_hook]]
+address = 0x825654A0
+name = "Q4Tick_VehicleWeaponNextFire"
+registers = ["r4", "r11"]
+# rvMonsterStroggMarine::State_Torso_MovingRangedAttack: nextShootTime (before stw r9,9580(r31); r10 = time)
+
+[[midasm_hook]]
+address = 0x825B2574
+name = "Q4Tick_StroggMarineNextShoot"
+registers = ["r9", "r10"]
+# --- Engine glue: idSessionLocal::Frame "numCmdsToRun > 10" -> 20 tics at 120 Hz --------------
+
+[[midasm_hook]]
+address = 0x821B73C8
+name = "Q4Tick_SessionTicClamp"
+registers = ["r29", "r30"]
+jump_address_on_true = 0x821B73DC
+# --- Engine glue: idCommonLocal::Async catch-up clamp 10 * GetUserCmdMSec() -> 160 ms ----------
+
+[[midasm_hook]]
+address = 0x821759D0
+name = "Q4Tick_AsyncCatchupClamp"
+registers = ["r8", "r9"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82175A20
+name = "Q4Tick_AsyncCatchupClamp"
+registers = ["r3", "r4"]
+after_instruction = true
+# --- Camera animations: frameRate == GetMHz() shortcut keeps its 60 Hz meaning ---------------
+# idCameraAnim::Think
+
+[[midasm_hook]]
+address = 0x824F4DFC
+name = "Q4Tick_CameraAnimMHz"
+registers = ["r11"]
+
+[[midasm_hook]]
+address = 0x824F4E28
+name = "Q4Tick_CameraAnimThinkFrame"
+registers = ["r6", "r10", "r11"]
+after_instruction = true
+# idCameraAnim::GetViewParms
+
+[[midasm_hook]]
+address = 0x824F5084
+name = "Q4Tick_CameraAnimMHz"
+registers = ["r11"]
+
+[[midasm_hook]]
+address = 0x824F50BC
+name = "Q4Tick_CameraAnimViewFrame"
+registers = ["r4", "r10", "r31", "f31"]
+after_instruction = true
+# --- rvPlaybackDriver::Start: mTransitionTime = numFrames * 16 --------------------------------
+
+[[midasm_hook]]
+address = 0x82463204
+name = "Q4Tick_PlaybackTransition"
+registers = ["r11", "r27"]
+# --- 360 controller look: per-tic 2-tap smoothing of the stick response ------------------------
+
+[[midasm_hook]]
+address = 0x821C9D14
+name = "Q4Tick_StickSmoothYaw"
+registers = ["f12", "f29"]
+
+[[midasm_hook]]
+address = 0x821C9D3C
+name = "Q4Tick_StickSmoothPitch"
+registers = ["f0", "f1"]
