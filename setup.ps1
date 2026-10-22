@@ -260,7 +260,13 @@ if (Test-Path $rexglue) {
     }
     Push-Location $SdkDir
     try {
-        Run 'git' @('-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--recursive', '--depth', '1') 'Downloading the SDK libraries'
+        $ErrorActionPreference = 'Continue'
+        & git -c core.autocrlf=false submodule update --init --recursive --depth 1
+        $ErrorActionPreference = 'Stop'
+        if ($LASTEXITCODE -ne 0) {
+            Info 'Shallow download of the libraries failed; downloading their full history instead...'
+            Run 'git' @('-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--recursive') 'Downloading the SDK libraries'
+        }
         # Windows checks out a few libmspack symlinks as small text files holding the target path.
         $msp = Join-Path $SdkDir 'thirdparty\libmspack\cabextract\mspack'
         if (Test-Path $msp) {
