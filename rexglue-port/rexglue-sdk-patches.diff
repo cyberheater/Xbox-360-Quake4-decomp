@@ -1,3 +1,15 @@
+diff --git a/include/rex/audio/sdl/sdl_audio_driver.h b/include/rex/audio/sdl/sdl_audio_driver.h
+index f8949ca..bb603ee 100644
+--- a/include/rex/audio/sdl/sdl_audio_driver.h
++++ b/include/rex/audio/sdl/sdl_audio_driver.h
+@@ -39,6 +39,7 @@ class SDLAudioDriver : public AudioDriver {
+ 
+   SDL_AudioStream* sdl_stream_ = nullptr;
+   bool sdl_initialized_ = false;
++  bool null_audio_ = false;
+   uint8_t sdl_device_channels_ = 0;
+ 
+   static const uint32_t frame_frequency_ = 48000;
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..1e07838 100644
 --- a/include/rex/graphics/command_processor.h
@@ -75,6 +87,87 @@ index c7ce93f..b77443f 100644
  
    XThread* callback_thread_ = nullptr;
    uint32_t callback_routine_ = 0;
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..7ef6fb3 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -44,8 +44,10 @@ bool SDLAudioDriver::Initialize() {
+   SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
+ 
+   if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+-    REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
+-    return false;
++    REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {} (continuing silent)",
++                 SDL_GetError());
++    null_audio_ = true;
++    return true;
+   }
+   sdl_initialized_ = true;
+ 
+@@ -58,14 +60,16 @@ bool SDLAudioDriver::Initialize() {
+   sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
+                                           SDLCallback, this);
+   if (!sdl_stream_) {
+-    REXAPU_ERROR("SDL_OpenAudioDeviceStream() failed: {}", SDL_GetError());
+-    return false;
++    REXAPU_ERROR("SDL_OpenAudioDeviceStream() failed: {} (continuing silent)", SDL_GetError());
++    null_audio_ = true;
++    return true;
+   }
+ 
+   SDL_AudioDeviceID sdl_device = SDL_GetAudioStreamDevice(sdl_stream_);
+   if (!sdl_device) {
+-    REXAPU_ERROR("SDL_GetAudioStreamDevice() failed: {}", SDL_GetError());
+-    return false;
++    REXAPU_ERROR("SDL_GetAudioStreamDevice() failed: {} (continuing silent)", SDL_GetError());
++    null_audio_ = true;
++    return true;
+   }
+ 
+   if (!SDL_GetAudioDeviceFormat(sdl_device, &obtained_spec, NULL)) {
+@@ -83,13 +87,17 @@ bool SDLAudioDriver::Initialize() {
+     sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
+                                             SDLCallback, this);
+     if (!sdl_stream_) {
+-      REXAPU_ERROR("SDL_OpenAudioDeviceStream() stereo fallback failed: {}", SDL_GetError());
+-      return false;
++      REXAPU_ERROR("SDL_OpenAudioDeviceStream() stereo fallback failed: {} (continuing silent)",
++                   SDL_GetError());
++      null_audio_ = true;
++      return true;
+     }
+     sdl_device = SDL_GetAudioStreamDevice(sdl_stream_);
+     if (!sdl_device) {
+-      REXAPU_ERROR("SDL_GetAudioStreamDevice() failed after stereo fallback: {}", SDL_GetError());
+-      return false;
++      REXAPU_ERROR("SDL_GetAudioStreamDevice() failed after stereo fallback: {} (continuing silent)",
++                   SDL_GetError());
++      null_audio_ = true;
++      return true;
+     }
+   }
+ 
+@@ -102,14 +110,18 @@ bool SDLAudioDriver::Initialize() {
+               static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+ 
+   if (!SDL_ResumeAudioDevice(sdl_device)) {
+-    REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
+-    return false;
++    REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {} (continuing silent)", SDL_GetError());
++    null_audio_ = true;
++    return true;
+   }
+ 
+   return true;
+ }
+ 
+ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
++  if (null_audio_) {
++    return;
++  }
+   const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
+   float* output_frame;
+   {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
 index a744375..c270717 100644
 --- a/src/graphics/command_processor.cpp

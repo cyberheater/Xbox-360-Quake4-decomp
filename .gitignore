@@ -31,3 +31,8 @@ build/
 *.log
 *.toml.bak
 q4.toml
+
+# One-click setup (setup.ps1): SDK checkout/build, installed game, log
+.build/
+/Quake4/
+setup.log

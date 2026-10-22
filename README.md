@@ -75,6 +75,20 @@ Not done / known issues:
 | `legacy-runtime/` | My earlier hand-written runtime (XenonRecomp output + a custom Direct3D 11 / Xenos GPU emulation). Superseded by the ReXGlue port but kept for reference. Sources only. |
 | `legacy-runtime-config/` | Function/switch-table analysis data and helper scripts used with XenonRecomp. |
 
+## Quick setup (one click)
+
+1. Install **Visual Studio 2022** (the free Community edition or Build Tools) with *Desktop development
+   with C++*, *C++ Clang tools for Windows* and *C++ CMake tools for Windows*, and **git**. (If they are
+   missing, the setup offers to install them for you with `winget`.)
+2. Download this repository (Code > Download ZIP, or `git clone`) and double-click **`Setup.bat`**.
+3. Pick your Quake 4 ISO (or `default.xex` from an extracted copy) when asked.
+
+The setup downloads the ReXGlue SDK, applies this project's patches, builds it, converts the game code
+from **your** copy on your PC, and builds `q4hle.exe` and `q4.exe` into a `Quake4` folder next to
+`Setup.bat`, with a "Quake 4" desktop shortcut (q4hle). The first run takes roughly 30-60 minutes; run it
+again after updating the repository to rebuild (`Setup.bat -Clean` rebuilds the game from scratch). A log
+is written to `setup.log`.
+
 ## Building (ReXGlue port)
 
 Requirements: Windows 10/11, Visual Studio 2022 with the C++ Clang tools (clang 19+ works), CMake 3.25+, Ninja, git.
