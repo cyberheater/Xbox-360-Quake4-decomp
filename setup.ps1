@@ -15,12 +15,14 @@
 # Options: -GamePath <iso or default.xex>   skip the file dialog
 #          -Clean                           rebuild the game from scratch (keeps the SDK)
 #          -NoShortcut                      don't create a desktop shortcut
+#          -NoPause                         don't wait for Enter at the end
 
 [CmdletBinding()]
 param(
     [string]$GamePath = '',
     [switch]$Clean,
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    [switch]$NoPause   # don't wait for Enter at the end (also automatic when input is redirected)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +51,7 @@ function Fail([string]$text) {
     Write-Host "SETUP FAILED: $text" -ForegroundColor Red
     Write-Host "The full log is in $LogFile"
     try { Stop-Transcript | Out-Null } catch { }
-    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to close' | Out-Null }
+    if (-not $NoPause -and -not [Console]::IsInputRedirected) { Read-Host 'Press Enter to close' | Out-Null }
     exit 1
 }
 # Runs a program; stops the setup if it fails. (Native programs write progress to stderr, which
@@ -60,6 +62,7 @@ function Run([string]$exe, [string[]]$arguments, [string]$what) {
     if ($LASTEXITCODE -ne 0) { Fail "$what (exit code $LASTEXITCODE)" }
 }
 function Ask([string]$question) {
+    if ([Console]::IsInputRedirected) { return $false }
     $a = Read-Host "$question [Y/N]"
     return $a -match '^(y|yes)$'
 }
@@ -363,4 +366,4 @@ Write-Host "  $OutDir\q4hle.exe  - native renderer: 120 Hz, Options > GRAPHICS m
 Write-Host "  $OutDir\q4.exe     - emulated Xbox 360 GPU (the original port)"
 Write-Host 'Run Setup.bat again after updating the repository to rebuild.'
 try { Stop-Transcript | Out-Null } catch { }
-if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to close' | Out-Null }
+if (-not $NoPause -and -not [Console]::IsInputRedirected) { Read-Host 'Press Enter to close' | Out-Null }
