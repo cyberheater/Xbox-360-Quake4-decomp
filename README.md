@@ -80,7 +80,9 @@ Not done / known issues:
 1. Install **Visual Studio 2022** (the free Community edition or Build Tools) with *Desktop development
    with C++*, *C++ Clang tools for Windows* and *C++ CMake tools for Windows*, and **git**. (If they are
    missing, the setup offers to install them for you with `winget`.)
-2. Download this repository (Code > Download ZIP, or `git clone`) and double-click **`Setup.bat`**.
+2. Download **`Quake4-Setup-0.2.0.exe`** from the [Releases](../../releases) page and run it (it unpacks this
+   project into a folder you choose and starts the setup), or download this repository (Code > Download
+   ZIP, or `git clone`) and double-click **`Setup.bat`**.
 3. Pick your Quake 4 ISO (or `default.xex` from an extracted copy) when asked.
 
 The setup downloads the ReXGlue SDK, applies this project's patches, builds it, converts the game code

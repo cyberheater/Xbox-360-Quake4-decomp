@@ -36,3 +36,6 @@ q4.toml
 .build/
 /Quake4/
 setup.log
+
+# Installer build output
+installer/out/
