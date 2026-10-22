@@ -15,7 +15,24 @@ A static recompilation of the **Xbox 360 version of Quake 4** so it runs nativel
 > It exists for education and preservation research. Please do not use it to pirate games.
 >
 
-Why?
+## What's new in v0.2.0
+
+A new native-renderer build, **`q4hle.exe`**, built alongside `q4.exe` (`-DQ4_HLE=ON`):
+- **Native Direct3D 11 renderer** that draws the game's own D3D calls directly instead of emulating the
+  Xbox 360 GPU, with internal resolutions up to 5120x2880
+- **120 Hz game tick** (`q4_tickrate`, automatic from the display's refresh rate) with the game's timing
+  code adjusted so physics, AI and animation stay correct
+- The game's renderer back end runs on its **own thread**, a frame behind the front end (`Q4_RB_THREAD=0`
+  turns it off); in heavy fights about 117-119 fps instead of 94
+- **GRAPHICS page in the game's own Options menu**: resolution, display mode, V-Sync, anti-aliasing (FXAA),
+  texture filtering, FPS counter and **side-by-side stereoscopic 3D** (half / full SBS, three depth
+  levels), with an APPLY entry; changes are saved to `q4.toml`
+- **QUIT GAME** on the title-screen menu
+- Details and all switches: `rexglue-port/docs/hle.md` and `rexglue-port/docs/tickrate.md`
+- Fixed: the view weapon could flicker unlit while the render thread was drawing it
+
+## Why?
+
 Quake 4 was a launch game for the Xbox 360 and suffered as a result.  Ran at an unlocked frame rate 
 that wildly wandered between 10 and 60 fps.  I wanted a version that ran smooth.
 Why not use the PC version.  The Xbox 360 version has native support for joypads with a touch of 
@@ -41,19 +58,6 @@ Working:
 - **F9** toggles an FPS counter (top-right corner: frames per second, frame time, longest recent frame)
 - The mouse cursor hides itself while playing and returns when you move the mouse
 - **F4** opens the SDK's generic engine-settings overlay
-
-New in the native-renderer build (`q4hle.exe`, built alongside `q4.exe`):
-- **Native Direct3D 11 renderer** that draws the game's own D3D calls directly instead of emulating the
-  Xbox 360 GPU, with internal resolutions up to 5120x2880
-- **120 Hz game tick** (`q4_tickrate`, automatic from the display's refresh rate) with the game's timing
-  code adjusted so physics, AI and animation stay correct
-- The game's renderer back end runs on its **own thread**, a frame behind the front end (`Q4_RB_THREAD=0`
-  turns it off); in heavy fights about 117-119 fps instead of 94
-- **GRAPHICS page in the game's own Options menu**: resolution, display mode, V-Sync, anti-aliasing (FXAA),
-  texture filtering, FPS counter and **side-by-side stereoscopic 3D** (half / full SBS, three depth
-  levels), with an APPLY entry; changes are saved to `q4.toml`
-- **QUIT GAME** on the title-screen menu
-- Details and all switches: `rexglue-port/docs/hle.md` and `rexglue-port/docs/tickrate.md`
 
 Not done / known issues:
 - Early build: expect crashes and rough edges further into the game
