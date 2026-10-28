@@ -1,30 +1,38 @@
 # Third-party notices
 
-## Cathode (CRT filter)
+## Real CRT Phosphor (CRT filter)
 
-The CRT FILTER option (`src/hle/renderer.cpp`, "CRT filter") is a port of the picture shader
-(`assets/crt.hlsl`) and presets of Cathode: https://github.com/skulitom/CathodeDisplay
+The CRT FILTER option (`src/hle/renderer.cpp`, "CRT filter") is a modified port of Real CRT Phosphor v1.1
+by gunkun, https://github.com/crt2oldgamer-stack/real-crt-phosphor (RetroArch slang shaders ported to
+Direct3D 11 HLSL; line count chosen in the menu; dither/soft passes omitted). Its terms of use follow.
+Under them it may be used, modified and redistributed for non-commercial purposes only, with credit.
 
 ```
-MIT License
+Real CRT Phosphor — Terms of Use
 
-Copyright (c) 2026 Artem (skulitom)
+Author
+  Concept, visual direction, real-device testing and preset tuning: gunkun (건군)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+AI-generated work notice
+  Most of the code in this shader was written by AI:
+  - Claude (Anthropic): shader structure and most of the code
+  - ChatGPT (OpenAI): code review, slot mask implementation, performance optimisation
+  A human (gunkun) set the target look, judged the results on real devices, chose the direction
+  and tuned the parameters.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Terms
+  1. Free to use, modify and redistribute for non-commercial purposes.
+  2. When redistributing or sharing a modified version, credit the author (gunkun) and the original
+     name (Real CRT Phosphor), and include this file (LICENSE.txt / LICENSE_KR.txt).
+  3. Commercial use (selling, paid distribution, inclusion in commercial products or services)
+     requires prior permission.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Disclaimer
+  1. This shader is provided "as is", without warranty of any kind. The author is not liable for any
+     problem arising from its use.
+  2. Files obtained anywhere other than the official distribution site may have been altered.
+     The author is not responsible for errors, viruses or malicious code in such files.
+     Official distribution: [distribution URL]
+
+Note: these are custom terms set by the author, not a standard open-source licence.
 ```

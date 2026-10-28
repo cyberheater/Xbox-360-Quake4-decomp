@@ -11,7 +11,8 @@
 //   TEXTURE FILTERING  off / 2x / 4x / 8x / 16x anisotropic     (anisotropic_override)
 //   FPS COUNTER        off / on                                 (q4_show_fps)
 //   3D MODE, 3D DEPTH  q4hle only: side-by-side stereo           (q4hle_stereo, q4hle_stereo_depth)
-//   CRT FILTER         q4hle only: Cathode CRT look                 (q4hle_crt_filter)
+//   CRT FILTER         q4hle only: Real CRT Phosphor               (q4hle_crt_filter)
+//   (q4hle's RESOLUTION offers 720p to 2880p in steps, through q4hle_render_height)
 //
 // Changes are made with left/right (or A) and take effect only when APPLY is selected; leaving
 // the page with B discards them. The page talks to the host with console commands, handled here
@@ -58,10 +59,15 @@ REXCVAR_DEFINE_INT32(q4hle_stereo, 0, "GPU",
                      "q4hle: stereoscopic 3D output. 0 = off, 1 = half side-by-side, 2 = full side-by-side");
 REXCVAR_DEFINE_INT32(q4hle_stereo_depth, 2, "GPU", "q4hle: stereoscopic 3D depth strength, 1-3");
 
-// CRT look in the native renderer (q4hle; see renderer.cpp "CRT filter", from Cathode).
+// CRT look in the native renderer (q4hle; see renderer.cpp "CRT filter", Real CRT Phosphor).
 REXCVAR_DEFINE_INT32(q4hle_crt_filter, 0, "GPU",
-                     "q4hle: CRT filter (phosphor grille, scanlines, glow, curved glass). 0 = off, "
-                     "1 = classic, 2 = arcade, 3 = soft");
+                     "q4hle: CRT filter (Real CRT Phosphor). 0 = off, 1/2/3 = aperture grille with "
+                     "240/360/480 lines, 4/5/6 = slot mask with 240/360/480 lines");
+
+// q4hle render resolution as a height in lines (720 = 1280x720 ... 2880). 0 = use resolution_scale.
+REXCVAR_DEFINE_INT32(q4hle_render_height, 0, "GPU",
+                     "q4hle: render resolution height (720, 900, 1080, 1440, 1800, 2160, 2880; width "
+                     "is 16:9). 0 = resolution_scale x 720. Applies instantly.");
 
 namespace q4gfx {
 namespace {
@@ -86,10 +92,14 @@ struct Row {
 
 const std::vector<Row>& Rows() {
   static const std::vector<Row> rows = {
+#ifdef Q4_HLE
+      {"RESOLUTION", "RESOLUTION", "Resolution the game renders at. Higher is sharper but slower.",
+       {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3200 x 1800", "3840 x 2160", "5120 x 2880"}},
+#else
       {"RESOLUTION", "RESOLUTION",
-       kLive ? "Resolution the game renders at. Higher is sharper but slower."
-             : "Resolution the game renders at. Higher is sharper but slower. Applies after a restart.",
+       "Resolution the game renders at. Higher is sharper but slower. Applies after a restart.",
        {"1280 x 720", "2560 x 1440", "3840 x 2160", "5120 x 2880"}},
+#endif
       {"DISPLAY MODE", "DISPLAY MODE",
        kLive ? "Play in a window or fullscreen." : "Play in a window or fullscreen. Applies after a restart.",
        {"WINDOWED", "FULLSCREEN"}},
@@ -107,13 +117,17 @@ const std::vector<Row>& Rows() {
        {"OFF", "HALF SBS", "FULL SBS"}},
       {"3D DEPTH", "3D DEPTH", "How strong the 3D effect is.", {"LOW", "MEDIUM", "HIGH"}},
       {"CRT FILTER", "CRT FILTER",
-       "Retro CRT look: RGB phosphor grille, scanlines, glow and curved glass (from Cathode). "
-       "ARCADE is the strongest, SOFT the gentlest. Turns off 3D mode.",
-       {"OFF", "CLASSIC", "ARCADE", "SOFT"}},
+       "Real CRT Phosphor: light only from RGB phosphor stripes, with scanlines. Fewer lines = "
+       "more retro. Best at 1440p or 4K. Turns off 3D mode.",
+       {"OFF", "GRILLE 240", "GRILLE 360", "GRILLE 480", "SLOT 240", "SLOT 360", "SLOT 480"}},
 #endif
   };
   return rows;
 }
+
+#ifdef Q4_HLE
+constexpr int kHeights[7] = {720, 900, 1080, 1440, 1800, 2160, 2880};  // q4hle RESOLUTION choices
+#endif
 
 bool CvarTrue(const char* name) {
   const std::string v = rex::cvar::GetFlagByName(name);
@@ -129,7 +143,18 @@ int CvarInt(const char* name, int def) {
 // Current choice of each row (index into Row::choices).
 int CurrentChoice(size_t row) {
   switch (row) {
-    case 0: return std::clamp(CvarInt("resolution_scale", 1), 1, 4) - 1;
+    case 0: {
+#ifdef Q4_HLE
+      int hgt = CvarInt("q4hle_render_height", 0);
+      if (hgt < 720) hgt = 720 * std::clamp(CvarInt("resolution_scale", 1), 1, 4);
+      int best = 0;
+      for (int i = 0; i < 7; ++i)
+        if (std::abs(kHeights[i] - hgt) < std::abs(kHeights[best] - hgt)) best = i;
+      return best;
+#else
+      return std::clamp(CvarInt("resolution_scale", 1), 1, 4) - 1;
+#endif
+    }
     case 1: return CvarTrue("fullscreen") ? 1 : 0;
     case 2: return CvarTrue(kVsyncCvar) ? 1 : 0;
     case 3: {
@@ -143,7 +168,7 @@ int CurrentChoice(size_t row) {
     case 5: return CvarTrue("q4_show_fps") ? 1 : 0;
     case 6: return std::clamp(CvarInt("q4hle_stereo", 0), 0, 2);
     case 7: return std::clamp(CvarInt("q4hle_stereo_depth", 2), 1, 3) - 1;
-    case 8: return std::clamp(CvarInt("q4hle_crt_filter", 0), 0, 3);
+    case 8: return std::clamp(CvarInt("q4hle_crt_filter", 0), 0, 6);
   }
   return 0;
 }
@@ -153,7 +178,15 @@ void Apply(size_t row, int choice) {
   if (row >= rows.size()) return;
   choice = std::clamp(choice, 0, int(rows[row].choices.size()) - 1);
   switch (row) {
-    case 0: rex::cvar::SetFlagByName("resolution_scale", std::to_string(choice + 1)); break;
+    case 0:
+#ifdef Q4_HLE
+      rex::cvar::SetFlagByName("q4hle_render_height", std::to_string(kHeights[choice]));
+      // q4.exe only has whole multiples of 720p
+      rex::cvar::SetFlagByName("resolution_scale", std::to_string(std::clamp(kHeights[choice] / 720, 1, 4)));
+#else
+      rex::cvar::SetFlagByName("resolution_scale", std::to_string(choice + 1));
+#endif
+      break;
     case 1: {
       const bool fs = choice == 1;
       rex::cvar::SetFlagByName("fullscreen", fs ? "true" : "false");

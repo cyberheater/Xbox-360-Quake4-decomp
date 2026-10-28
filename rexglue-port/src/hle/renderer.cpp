@@ -392,7 +392,10 @@ std::unordered_map<uint64_t, RenderTarget> g_rts;
 
 uint32_t g_rt_height = 1024;
 // Internal resolution scale: render targets and resolves are g_scale x the guest size.
-uint32_t g_scale = 1;
+float g_scale = 1.0f;
+// a guest length in render-target pixels
+inline uint32_t Sc(uint32_t v) { return uint32_t(std::lround(double(v) * g_scale)); }
+inline int32_t Sc(int32_t v) { return int32_t(std::lround(double(v) * g_scale)); }
 
 // Stereoscopic 3D state (see "Stereoscopic 3D" below).
 int g_stereo_mode = 0, g_stereo_depth = 2;
@@ -403,16 +406,19 @@ float g_depth_clear = 1.0f;  // last depth clear value (1: near is small depth; 
 void RefreshStereoSettings();
 
 // CRT filter state (see "CRT filter" below).
-int g_crt_preset = 0;  // q4hle_crt_filter: 0 off, 1 classic, 2 arcade, 3 soft
+int g_crt_preset = 0;  // q4hle_crt_filter: 0 off, 1-3 grille 240/360/480, 4-6 slot mask
 void RefreshCrtSettings();
 
 // Q4_HLE_SCALE (1-4) if set, else the resolution_scale cvar (GRAPHICS menu). Changes of the cvar
 // apply between frames (ApplyScaleChange).
 // (The SDK's cvars are read by name: their storage is not exported from the runtime DLL.)
-uint32_t DesiredScale() {
-  if (const char* sc = std::getenv("Q4_HLE_SCALE"); sc && *sc) return uint32_t(std::clamp(std::atoi(sc), 1, 4));
+float DesiredScale() {
+  if (const char* sc = std::getenv("Q4_HLE_SCALE"); sc && *sc) return float(std::clamp(std::atof(sc), 1.0, 4.0));
+  // q4hle_render_height (GRAPHICS menu: 720 ... 2880 lines) wins over the whole-number resolution_scale
+  const std::string hgt = rex::cvar::GetFlagByName("q4hle_render_height");
+  if (const int hh = hgt.empty() ? 0 : std::atoi(hgt.c_str()); hh >= 720) return std::min(4.0f, float(hh) / 720.0f);
   const std::string v = rex::cvar::GetFlagByName("resolution_scale");
-  return uint32_t(std::clamp(v.empty() ? 1 : std::atoi(v.c_str()), 1, 4));
+  return float(std::clamp(v.empty() ? 1 : std::atoi(v.c_str()), 1, 4));
 }
 
 RenderTarget* GetRT(uint32_t edram_base, uint32_t format, uint32_t pitch, bool depth) {
@@ -420,8 +426,8 @@ RenderTarget* GetRT(uint32_t edram_base, uint32_t format, uint32_t pitch, bool d
   const uint64_t key = uint64_t(edram_base) | (uint64_t(format) << 12) | (uint64_t(pitch) << 16) | (uint64_t(depth) << 40);
   RenderTarget& rt = g_rts[key];
   if (rt.tex) return &rt;
-  rt.w = pitch * g_scale;
-  rt.h = g_rt_height * g_scale;
+  rt.w = Sc(pitch);
+  rt.h = Sc(uint32_t(g_rt_height));
   rt.depth = depth;
   D3D11_TEXTURE2D_DESC td{};
   td.Width = rt.w;
@@ -930,7 +936,7 @@ bool Init() {
   tex::RefreshSettings();
   RefreshCrtSettings();
   RefreshStereoSettings();
-  Log("renderer: internal resolution scale %ux", g_scale);
+  Log("renderer: internal resolution scale %.3fx", g_scale);
   OutDir();
   g_inited = true;
   Log("renderer: initialised");
@@ -966,7 +972,7 @@ void FillDrawCB(const Regs& R, const uint8_t* base, uint32_t dev, const xenos::T
   const float zs = (vte & 16) ? R.F(PA_CL_VPORT_ZSCALE) : 1.0f, zo = (vte & 32) ? R.F(PA_CL_VPORT_ZOFFSET) : 0.0f;
   RenderTarget* any = bt.color[0] ? bt.color[0] : bt.depth;
   // guest pixel units (render targets are g_scale times larger)
-  const float W = any ? float(any->w / g_scale) : 1280.0f, H = any ? float(any->h / g_scale) : 720.0f;
+  const float W = any ? std::round(float(any->w) / g_scale) : 1280.0f, H = any ? std::round(float(any->h) / g_scale) : 720.0f;
   const bool half_pixel = !(R(PA_SU_VTX_CNTL) & 1);  // D3D9 pixel centres
   const float hp = half_pixel ? 0.5f : 0.0f;
   cb.ndc_scale[0] = 2.0f * xs / W;
@@ -1120,7 +1126,7 @@ void StepDump(RenderTarget* rt, uint32_t index) {
       td.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS && td.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
     return;
   const bool bgra = td.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS || td.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
-  const uint32_t w = std::min<uint32_t>(td.Width, 1280 * g_scale), h = std::min<uint32_t>(td.Height, 720 * g_scale);
+  const uint32_t w = std::min<uint32_t>(td.Width, Sc(1280u)), h = std::min<uint32_t>(td.Height, Sc(720u));
   td.Usage = D3D11_USAGE_STAGING;
   td.BindFlags = 0;
   td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -1131,7 +1137,7 @@ void StepDump(RenderTarget* rt, uint32_t index) {
   ctx->CopyResource(st, rt->tex);
   D3D11_MAPPED_SUBRESOURCE ms;
   if (SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &ms))) {
-    const uint32_t step = 2 * g_scale, ow = w / step, oh = h / step;
+    const uint32_t step = std::max<uint32_t>(1, Sc(2u)), ow = w / step, oh = h / step;
     std::vector<uint8_t> px(size_t(ow) * oh * 4);
     for (uint32_t y = 0; y < oh; ++y)
       for (uint32_t x = 0; x < ow; ++x)
@@ -1638,9 +1644,9 @@ void ExecuteDraw(uint8_t* base, Cmd& c) {
     g_state.vp = vp;
   }
   {
-    const int32_t S = int32_t(g_scale);
-    D3D11_RECT sr{std::max(0, c.scissor[0] * S), std::max(0, c.scissor[1] * S),
-                  std::min<int32_t>(c.scissor[2] * S, LONG(vp.Width)), std::min<int32_t>(c.scissor[3] * S, LONG(vp.Height))};
+    D3D11_RECT sr{std::max<int32_t>(0, Sc(int32_t(c.scissor[0]))), std::max<int32_t>(0, Sc(int32_t(c.scissor[1]))),
+                  std::min<int32_t>(Sc(int32_t(c.scissor[2])), LONG(vp.Width)),
+                  std::min<int32_t>(Sc(int32_t(c.scissor[3])), LONG(vp.Height))};
     if (!g_state.valid || std::memcmp(&g_state.scissor, &sr, sizeof(sr)) != 0) {
       ctx->RSSetScissorRects(1, &sr);
       g_state.scissor = sr;
@@ -1802,7 +1808,7 @@ void ExecuteClear(Cmd& cmd) {
   const float col[4] = {((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f, (color & 255) / 255.0f,
                         (color >> 24) / 255.0f};
   std::vector<D3D11_RECT> rl = cmd.rects;
-  for (auto& r : rl) r.left *= g_scale, r.top *= g_scale, r.right *= g_scale, r.bottom *= g_scale;
+  for (auto& r : rl) r.left = Sc(int32_t(r.left)), r.top = Sc(int32_t(r.top)), r.right = Sc(int32_t(r.right)), r.bottom = Sc(int32_t(r.bottom));
   ID3D11DeviceContext1* ctx1 = nullptr;
   if (!rl.empty()) ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1));
   for (int i = 0; i < 4; ++i) {
@@ -1880,8 +1886,8 @@ void ExecuteResolve(Cmd& cmd) {
       dx = cmd.dest_pt[0];
       dy = cmd.dest_pt[1];
     }
-    x1 *= g_scale, y1 *= g_scale, x2 *= g_scale, y2 *= g_scale, dx *= g_scale, dy *= g_scale;
-    const uint32_t tw = f.width * g_scale, th = f.height * g_scale;
+    x1 = Sc(x1), y1 = Sc(y1), x2 = Sc(x2), y2 = Sc(y2), dx = Sc(dx), dy = Sc(dy);
+    const uint32_t tw = Sc(f.width), th = Sc(f.height);
     ResolvedTex& rt = g_resolve_targets[f.base];
     if (!rt.tex || rt.w != tw || rt.h != th || rt.family != src->copy_format) {
       SafeRelease(rt.srv);
@@ -2151,7 +2157,7 @@ void StereoTrackDraw(const Regs& R, const BoundTargets& bt) {
   if (!g_stereo_mode) return;
   const bool ztest = (R(RB_DEPTHCONTROL) >> 1) & 1;
   RenderTarget* c0 = bt.color[0];
-  if (!c0 || c0->w < 1280 * g_scale) return;
+  if (!c0 || c0->w < Sc(1280u)) return;
   if (ztest && bt.depth) {
     if (c0 != g_st_rt) g_st_have = false;
     g_st_rt = c0;
@@ -2273,151 +2279,450 @@ bool StereoBlit(ID3D11ShaderResourceView* final_srv, uint32_t w, uint32_t h) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CRT filter: the picture shader of Cathode by Artem (skulitom), MIT licence,
-// https://github.com/skulitom/CathodeDisplay (assets/crt.hlsl; see docs/THIRD_PARTY_NOTICES.md),
-// ported from ps_3 to ps_5. RGB aperture-grille phosphor strips, scanlines, glow, curved glass and
-// vignette, drawn in the final blit at the window's pixel size. q4hle_crt_filter: 0 off, then
-// Cathode's presets 1 Classic, 2 Arcade, 3 Soft (Q4_HLE_CRT=0-3 overrides). FXAA, if on, is
-// applied first; 3D mode is off while the filter is on.
+// CRT filter: Real CRT Phosphor v1.1 by gunkun (concept, direction, testing, tuning; code largely
+// AI-written), https://github.com/crt2oldgamer-stack/real-crt-phosphor. Free for non-commercial
+// use with credit; its terms are in docs/THIRD_PARTY_NOTICES.md. Ported from the RetroArch slang
+// chain to D3D11, with the "4K PS2" preset values (grille pitch 4.5 px; slot mask pitch 3 px).
+//
+// The picture is emitted only by red, green and blue phosphor stripes: the frame is first reduced
+// to a CRT-like line count (q4hle: 240, 360 or 480 lines, chosen in the menu, instead of the
+// original's guess from the source height), run through an analog signal stage (luma/chroma
+// smear, peaking, saturation, levels, S-curve), drawn as gaussian scanline beams whose width
+// follows brightness, then split into R/G/B stripes (aperture grille or slot mask) that widen
+// with brightness and melt into glow in highlights, and finally softened. Passes:
+//   box (frame -> line grid), signal, vblur, glow_h, glow_v  at the line grid
+//   beam, rgb, post_h  at the output size; post_v writes the back buffer.
+// Dither (0) and soft (0) are off in the preset and skipped; the kern pass's weights are computed
+// in the signal pass. q4hle_crt_filter: 0 off; 1-3 grille 240/360/480; 4-6 slot 240/360/480.
+// Q4_HLE_CRT=0-6 overrides. FXAA, if on, is applied first; 3D mode is off while it is on.
 const char kCrt[] = R"(
-Texture2D<float4> t : register(t0);
-SamplerState s : register(s0);
-// a: x,y = output size in pixels, z = pitch, w = scanlines; b: glow, curve, brightness, mask;
-// c.x = scanline spacing in output pixels (a whole number, so the lines stay even)
-cbuffer CrtCB : register(b0) { float4 a; float4 b; float4 c; };
+#define LUMA_BLUR 0.15
+#define LUMA_TAIL 0.25
+#define PEAKING 0.10
+#define CHROMA_BLUR 0.30
+#define CHROMA_TAIL 0.60
+#define SATURATION 1.30
+#define HUE 0.0
+#define LV_BLACK 0.0
+#define LV_WHITE 0.96
+#define S_LOW 0.55
+#define S_HIGH 0.30
+#define GAMMA_IN 1.0
+#define WP float3(0.79, 0.83, 0.91)
+#define VERT_BLUR 0.35
+#define BEAM_DARK 0.18
+#define BEAM_BRIGHT 0.32
+#define GLOW 0.12
+#define GLOW_R 0.8
+#define ST_DARK 0.45
+#define ST_BRIGHT 2.2
+#define ST_EDGE 0.7
+#define MELT_START 0.3
+#define MELT_END 0.7
+#define MELT_DARK 0.03
+#define MELT_BRIGHT 0.6
+#define MELT_BLOB 0.38
+#define RGB_BLUR_X 0.6
+#define RGB_BLUR_Y 0.45
+#define KNEE 0.8
+#define FINAL_BLUR 0.4
+#define BRIGHT 1.0
+#define SLOT_LINES 2.0
+#define SLOT_VADJ 1.0
+#define SLOT_SHAPE 1.0
+#define SLOT_GAP 0.22
+#define SLOT_DEPTH 0.6
+#define SLOT_EDGE 0.35
+#define SLOT_MELT 0.65
+
+Texture2D<float4> t0 : register(t0);
+Texture2D<float4> t1 : register(t1);
+SamplerState sp : register(s0);  // point, clamp
+SamplerState sl : register(s1);  // linear, clamp
+// s0: input size (xy) and 1/size (zw); o: this pass's output size and 1/size;
+// m: x = triad pitch px, y = mask type (0 grille, 1 slot), z = lines, w = 0
+cbuffer CrtCB : register(b0) { float4 s0; float4 o; float4 m; };
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-float4 ps_crt(V i) : SV_Target {
+
+float gmod(float x, float y) { return x - y * floor(x / y); }
+float3 ToLinear(float3 c) { return pow(saturate(c), 2.2 * GAMMA_IN) * WP; }
+float3 ToYIQ(float3 c) {
+  return float3(dot(c, float3(0.299, 0.587, 0.114)), dot(c, float3(0.596, -0.274, -0.322)),
+                dot(c, float3(0.211, -0.523, 0.312)));
+}
+float3 FromYIQ(float3 c) {
+  return float3(c.x + 0.956 * c.y + 0.621 * c.z, c.x - 0.272 * c.y - 0.647 * c.z, c.x - 1.106 * c.y + 1.703 * c.z);
+}
+float Erfc(float x) {
+  float z = abs(x);
+  float t = 1.0 / (1.0 + 0.3275911 * z);
+  float y = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * exp(-z * z);
+  return (x >= 0.0) ? y : 2.0 - y;
+}
+float ExGauss(float t, float s, float tau) {
+  s = max(s, 0.05);
+  if (tau < 0.05) return exp(-0.5 * t * t / (s * s));
+  float l = 1.0 / tau;
+  float e = clamp(l * (0.5 * l * s * s - t), -80.0, 80.0);
+  return exp(e) * Erfc((l * s * s - t) / (1.41421356 * s));
+}
+float NormalInterval(float a, float b) {
+  if (a >= 0.0) return 0.5 * (Erfc(a) - Erfc(b));
+  if (b <= 0.0) return 0.5 * (Erfc(-b) - Erfc(-a));
+  return 1.0 - 0.5 * (Erfc(-a) + Erfc(b));
+}
+float StripePrimitive(float x, float w, float e) {
+  float h = 0.5 * w;
+  float inner = h * (1.0 - e);
+  float r = min(abs(x), h);
+  float t = saturate((h - r) / max(h * e, 1e-8));
+  float area = (r <= inner) ? r : inner + h * e * (0.5 - t * t * t + 0.5 * t * t * t * t);
+  return sign(x) * area;
+}
+float K(float nW) { return clamp(nW / 256.0, 0.5, 1.25); }
+float4 At(int2 p) { return t0.Load(int3(clamp(p, int2(0, 0), int2(s0.xy) - 1), 0)); }
+
+// pass 0: average the frame down to the line grid (approximately linear light, like the original)
+float4 ps_box(V i) : SV_Target {
+  const float2 cell = s0.xy * o.zw;  // source pixels per grid pixel
+  const float2 base = floor(i.pos.xy) * cell;
+  float3 acc = 0;
+  [unroll] for (int y = 0; y < 4; ++y)
+    [unroll] for (int x = 0; x < 4; ++x) {
+      float3 c = t0.SampleLevel(sl, (base + (float2(x, y) + 0.5) * cell * 0.25) * s0.zw, 0).rgb;
+      acc += c * c;
+    }
+  return float4(sqrt(acc / 16.0), 1);
+}
+
+// pass 4: analog signal path
+float4 ps_signal(V i) : SV_Target {
+  const int2 p = int2(i.pos.xy);
+  const float k = K(s0.x);
+  const float sY = LUMA_BLUR * k, tY = LUMA_TAIL * k, sY2 = sqrt(sY * sY + 1.44 * k * k);
+  const float sC = CHROMA_BLUR * k, tC = CHROMA_TAIL * k;
+  const float sMax = max(max(sY2, sC), 0.5);
+  const int lo = max(-int(ceil(4.0 * sMax)), -32), hi = min(int(ceil(4.0 * sMax + 6.0 * max(tY, tC))), 64);
+  float Y1 = 0, W1 = 0, Y2 = 0, W2 = 0, W3 = 0;
+  float2 C = 0;
+  [loop] for (int j = lo; j <= hi; ++j) {
+    const float t = float(j);
+    const float3 yiq = ToYIQ(At(p - int2(j, 0)).rgb);
+    const float w1 = ExGauss(t, sY, tY), w2 = ExGauss(t, sY2, tY), w3 = ExGauss(t, sC, tC);
+    Y1 += w1 * yiq.x; W1 += w1;
+    Y2 += w2 * yiq.x; W2 += w2;
+    C += w3 * yiq.yz; W3 += w3;
+  }
+  const float yl = Y1 / max(W1, 1e-6);
+  const float Y = yl + PEAKING * (yl - Y2 / max(W2, 1e-6));
+  float2 c = C / max(W3, 1e-6);
+  const float h = radians(HUE);
+  c = float2(c.x * cos(h) - c.y * sin(h), c.x * sin(h) + c.y * cos(h)) * SATURATION;
+  float3 rgb = saturate(FromYIQ(float3(Y, c)));
+  const float ungraded = max(rgb.r, max(rgb.g, rgb.b));
+  rgb = saturate((rgb - LV_BLACK) / max(LV_WHITE - LV_BLACK, 0.01));
+  const float3 sm = rgb * rgb * (3.0 - 2.0 * rgb);
+  const float3 kk = lerp(float3(S_HIGH, S_HIGH, S_HIGH), float3(S_LOW, S_LOW, S_LOW), step(rgb, float3(0.5, 0.5, 0.5)));
+  rgb = rgb + kk * (sm - rgb);
+  return float4(rgb, ungraded);
+}
+
+// pass 5: vertical softness between neighbouring lines
+float4 ps_vblur(V i) : SV_Target {
+  const int2 p = int2(i.pos.xy);
+  const float vb = VERT_BLUR, ge = 2.2 * GAMMA_IN;
+  const int r = min(int(ceil(3.0 * vb)), 6);
+  float4 acc = 0;
+  float ws = 0;
+  [loop] for (int j = -r; j <= r; ++j) {
+    const float w = exp(-0.5 * j * j / (vb * vb));
+    acc += w * pow(saturate(At(p + int2(0, j))), ge);
+    ws += w;
+  }
+  return pow(acc / ws, 1.0 / ge);
+}
+
+// passes 6 and 7: glow (linear light)
+float4 ps_glow_h(V i) : SV_Target {
+  const int2 p = int2(i.pos.xy);
+  const float s = max(GLOW_R * 0.875 * K(s0.x), 0.1);
+  const int r = min(int(ceil(3.0 * s)), 24);
+  float3 acc = 0;
+  float ws = 0;
+  [loop] for (int j = -r; j <= r; ++j) {
+    const float w = exp(-0.5 * j * j / (s * s));
+    acc += w * ToLinear(At(p + int2(j, 0)).rgb);
+    ws += w;
+  }
+  return float4(acc / ws, 1);
+}
+float4 ps_glow_v(V i) : SV_Target {
+  const int2 p = int2(i.pos.xy);
+  const float s = max(GLOW_R * 0.6, 0.1);
+  const int r = min(int(ceil(3.0 * s)), 16);
+  float3 acc = 0;
+  float ws = 0;
+  [loop] for (int j = -r; j <= r; ++j) {
+    const float w = exp(-0.5 * j * j / (s * s));
+    acc += w * At(p + int2(0, j)).rgb;
+    ws += w;
+  }
+  return float4(acc / ws, 1);
+}
+
+// pass 8: scanline beams + glow, at the output size. t0 = glow, t1 = signal (s0 = signal size)
+float4 ps_beam(V i) : SV_Target {
   const float2 uv = i.uv;
-  const float pitch = a.z, scanlines = a.w, glow = b.x, curve = b.y, brightness = b.z, maskStrength = b.w;
-  float2 q = uv * 2 - 1;
-  float2 warped = q * (1 + curve * 0.075 * dot(q, q));
-  float2 p = warped * 0.5 + 0.5;
-  if (p.x < 0 || p.y < 0 || p.x > 1 || p.y > 1) return float4(0.012, 0.016, 0.014, 1);
-  float2 resolution = max(a.xy, 1);
-  float2 pixel = p * resolution;
-  // Each visible phosphor cell has three independent red, green and blue strips.
-  float cellWidth = max(pitch, 2);
-  float2 cell = float2(cellWidth, c.x);  // one cell per scanline
-  float2 sampleUv = (floor(pixel / cell) + 0.5) * cell / resolution;
-  sampleUv = lerp(p, sampleUv, maskStrength * 0.72);
-  float3 color = t.SampleLevel(s, sampleUv, 0).rgb;
-  float2 texel = 1.4 / resolution;
-  float3 bloom = t.SampleLevel(s, p + float2(texel.x, 0), 0).rgb;
-  bloom += t.SampleLevel(s, p - float2(texel.x, 0), 0).rgb;
-  bloom += t.SampleLevel(s, p + float2(0, texel.y), 0).rgb;
-  bloom += t.SampleLevel(s, p - float2(0, texel.y), 0).rgb;
-  bloom *= 0.25;
-  color = color * 1.06 + bloom * glow * 0.26;
-  // Keep the grille on the output raster to avoid curvature-induced moire bands.
-  float2 maskPixel = uv * resolution;
-  float triad = frac(maskPixel.x / cellWidth) * 3;
-  float3 mask = triad < 1 ? float3(1.65, 0.43, 0.43) : (triad < 2 ? float3(0.43, 1.65, 0.43) : float3(0.43, 0.43, 1.65));
-  float strip = smoothstep(0, 0.16, frac(triad)) * (1 - smoothstep(0.84, 1, frac(triad)));
-  mask *= lerp(0.56, 1, strip);
-  color *= lerp(float3(1, 1, 1), mask, maskStrength);
-  // Horizontal scanlines: each line is a bright beam with a dark gap below it (q4hle change:
-  // Cathode's lines were finer than the grille at high resolutions and read as vertical stripes).
-  float ph = frac(maskPixel.y / c.x) - 0.5;
-  float beam = exp(-ph * ph * 9.0);
-  color *= lerp(1.0, beam * 1.35, saturate(0.35 + scanlines));
-  float vignette = 1 - 0.19 * pow(abs(q.x * q.y), 1.3) - 0.055 * dot(q, q);
-  float edge = saturate(min(min(p.x, 1 - p.x), min(p.y, 1 - p.y)) * 140);
-  color = pow(saturate(color * brightness * vignette), 0.96);
-  color += float3(0.025, 0.035, 0.032) * pow(saturate(1 - length(uv - float2(0.3, -0.55))), 3);
-  return float4(color * edge, 1);
+  const float lines = s0.y, nW = s0.x;
+  const float ny = uv.y * lines;
+  const float nx = uv.x * nW - 0.5;
+  const float x0 = floor(nx), fx = nx - x0;
+  const float base = floor(ny - 0.5);
+  const float gexp = 2.2 * GAMMA_IN;
+  float3 acc = 0;
+  [unroll] for (int k = -1; k <= 2; ++k) {
+    const float li = clamp(base + k, 0.0, lines - 1.0);
+    const float d = abs(ny - (base + k + 0.5));
+    const float4 sA = t1.Load(int3(int(clamp(x0, 0.0, nW - 1.0)), int(li), 0));
+    const float4 sB = t1.Load(int3(int(clamp(x0 + 1.0, 0.0, nW - 1.0)), int(li), 0));
+    const float3 col = lerp(ToLinear(sA.rgb), ToLinear(sB.rgb), fx);
+    const float lu = lerp(pow(saturate(sA.a), gexp), pow(saturate(sB.a), gexp), fx);
+    const float w = BEAM_DARK + (BEAM_BRIGHT - BEAM_DARK) * sqrt(saturate(lu));
+    acc += col * exp(-0.5 * (d / w) * (d / w)) / (w * 2.5066);
+  }
+  acc += GLOW * t0.SampleLevel(sl, uv, 0).rgb;
+  return float4(acc, 1);
+}
+
+// pass 9: light emitted only by R, G, B phosphor stripes. t0 = beam image (output size)
+float SlotEmission(float py, float phase, float P) {
+  const float gap = clamp(SLOT_GAP, 0.0, 0.6);
+  if (gap <= 0.0) return 1.0;
+  const float edge = clamp(SLOT_EDGE, 0.05, 1.0);
+  const float width = gap * P;
+  const float d = gmod(py - phase + 0.5 * P, P) - 0.5 * P;
+  float area = 0.0;
+  if (P * (1.0 - gap) >= 1.00001) {
+    area = StripePrimitive(d + 0.5, width, edge) - StripePrimitive(d - 0.5, width, edge);
+  } else {
+    [unroll] for (int j = -1; j <= 1; ++j) {
+      const float q = d - j * P;
+      area += StripePrimitive(q + 0.5, width, edge) - StripePrimitive(q - 0.5, width, edge);
+    }
+  }
+  const float depth = clamp(SLOT_DEPTH, 0.0, 1.0);
+  return (1.0 - depth * saturate(area)) / (1.0 - depth * gap * (1.0 - 0.5 * edge));
+}
+float4 ps_rgb(V i) : SV_Target {
+  const float2 uv = i.uv;
+  const float T = m.x;
+  const float px = uv.x * o.x;
+  const float y = uv.y;
+  const float e = clamp(ST_EDGE, 0.05, 1.0);
+  const float tri = floor(px / T);
+  float3 outc = 0;
+  const bool slot = m.y > 0.5;
+  float2 gates = 1;
+  float yW = y;
+  if (slot) {
+    const float py = uv.y * o.y;
+    const float linePx = o.y / max(m.z, 1.0);
+    const float nl = floor(clamp(SLOT_LINES, 2.0, 4.0) + 0.5);
+    const float va = clamp(SLOT_VADJ, 0.5, 2.0);
+    const float P = max(2.0, linePx * nl * va);
+    const float ph = floor(nl * 0.5 + 0.5) * linePx * va;
+    if (SLOT_SHAPE > 0.5) yW = (floor(py / linePx) + 0.5) * linePx * o.w;
+    gates = float2(SlotEmission(py, 0.0, P), SlotEmission(py, ph, P));
+  }
+  const float reach = 0.5 * (T / 3.0) * max(ST_BRIGHT, ST_DARK) + 0.5;
+  [unroll] for (int c = 0; c < 3; ++c) {
+    const float off = (c + 0.5) / 3.0;
+    const float n0 = max(floor((px - reach) / T - off) + 1.0, tri - 3.0);
+    const float n1 = min(ceil((px + reach) / T - off) - 1.0, tri + 3.0);
+    [loop] for (int k = 0; k < 4; ++k) {
+      const float n = n0 + k;
+      if (n > n1) break;
+      const float xc = (n + off) * T;
+      const float V_ = max(t0.SampleLevel(sl, float2(xc * o.z, y), 0)[c], 0.0);
+      float Vw = V_;
+      if (yW != y) Vw = max(t0.SampleLevel(sl, float2(xc * o.z, yW), 0)[c], 0.0);
+      const float s = ST_DARK + (ST_BRIGHT - ST_DARK) * sqrt(saturate(Vw));
+      const float w = (T / 3.0) * s;
+      const float d = px - xc;
+      const float prof = StripePrimitive(d + 0.5, w, e) - StripePrimitive(d - 0.5, w, e);
+      const float gain = T / (w * (1.0 - 0.5 * e));
+      const float gate = slot ? (gmod(n, 2.0) < 1.0 ? gates.x : gates.y) : 1.0;
+      outc[c] += V_ * prof * gain * gate;
+    }
+  }
+  const float sig = max(MELT_BLOB, 0.05) * T;
+  float3 blobs = 0;
+  const int rb = int(ceil((4.0 * sig + 0.5) / T)) + 1;
+  [loop] for (int di = -5; di <= 5; ++di) {
+    if (abs(di) > rb) continue;
+    const float tc = (tri + di + 0.5) * T;
+    const float3 C = max(t0.SampleLevel(sl, float2(tc * o.z, y), 0).rgb, 0.0);
+    const float g = T * NormalInterval((px - 0.5 - tc) / (1.41421356 * sig), (px + 0.5 - tc) / (1.41421356 * sig));
+    float gate = 1.0;
+    if (slot) gate = lerp(gmod(tri + di, 2.0) < 1.0 ? gates.x : gates.y, 1.0, saturate(SLOT_MELT));
+    blobs += C * g * gate;
+  }
+  const float3 h0 = t0.SampleLevel(sl, uv, 0).rgb;
+  const float L = max(h0.r, max(h0.g, h0.b));
+  float kk = saturate((L - MELT_START) / max(MELT_END - MELT_START, 0.01));
+  kk = kk * kk * (3.0 - 2.0 * kk);
+  const float dif = MELT_DARK + (MELT_BRIGHT - MELT_DARK) * kk;
+  return float4(lerp(outc, blobs, dif), 1);
+}
+
+// passes 10 and 11: blur after the RGB split, then brightness, highlight knee and gamma
+float3 Blur(float2 uv, float2 stepUV, float s) {
+  float3 acc = t0.SampleLevel(sl, uv, 0).rgb;
+  float ws = 1.0;
+  if (s > 0.05) {
+    const int r = min(int(ceil(3.0 * s)), 24);
+    [loop] for (int j = 1; j <= r; ++j) {
+      const float w = exp(-0.5 * j * j / (s * s));
+      acc += w * (t0.SampleLevel(sl, uv + j * stepUV, 0).rgb + t0.SampleLevel(sl, uv - j * stepUV, 0).rgb);
+      ws += 2.0 * w;
+    }
+  }
+  return acc / ws;
+}
+float BlurSigma(float b) { const float s0_ = b * m.x / 6.0, sf = FINAL_BLUR * m.x / 6.0; return sqrt(s0_ * s0_ + sf * sf); }
+float4 ps_post_h(V i) : SV_Target { return float4(Blur(i.uv, float2(o.z, 0), BlurSigma(RGB_BLUR_X)), 1); }
+float4 ps_post_v(V i) : SV_Target {
+  float3 acc = Blur(i.uv, float2(0, o.w), BlurSigma(RGB_BLUR_Y)) * BRIGHT;
+  const float kn = clamp(KNEE, 0.5, 0.999);
+  const float3 over = max(acc - kn, 0.0);
+  acc = min(acc, kn) + (1.0 - kn) * (1.0 - exp(-over / (1.0 - kn)));
+  return float4(pow(saturate(acc), 1.0 / 2.2), 1);
 }
 )";
-ID3D11PixelShader* g_crt_ps = nullptr;
+
+enum CrtPass { kCrtBox, kCrtSignal, kCrtVBlur, kCrtGlowH, kCrtGlowV, kCrtBeam, kCrtRgb, kCrtPostH, kCrtPostV, kCrtPasses };
+const char* const kCrtEntry[kCrtPasses] = {"ps_box", "ps_signal", "ps_vblur", "ps_glow_h", "ps_glow_v",
+                                           "ps_beam", "ps_rgb", "ps_post_h", "ps_post_v"};
+ID3D11PixelShader* g_crt_ps[kCrtPasses] = {};
 ID3D11Buffer* g_crt_cb = nullptr;
+ID3D11SamplerState* g_crt_point = nullptr;
 bool g_crt_failed = false;
-// the frame after FXAA (only used when FXAA is on)
-ID3D11Texture2D* g_crt_tex = nullptr;
-ID3D11RenderTargetView* g_crt_rtv = nullptr;
-ID3D11ShaderResourceView* g_crt_srv = nullptr;
-uint32_t g_crt_w = 0, g_crt_h = 0;
+struct CrtTex {
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+  uint32_t w = 0, h = 0;
+  DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+};
+// fxaa (frame size), box/signal/vblur (line grid, 8-bit), glow_h/glow (line grid, float),
+// beam/rgb/post_h (output size, float)
+enum { kTFxaa, kTBox, kTSignal, kTVBlur, kTGlowH, kTGlow, kTBeam, kTRgb, kTPostH, kTCount };
+CrtTex g_crt_t[kTCount];
 
 void RefreshCrtSettings() {
   const std::string v = rex::cvar::GetFlagByName("q4hle_crt_filter");
   int preset = v.empty() ? 0 : std::atoi(v.c_str());
   if (const char* e = std::getenv("Q4_HLE_CRT"); e && *e) preset = std::atoi(e);
-  preset = std::clamp(preset, 0, 3);
-  if (preset != g_crt_preset) Log("crt filter: preset %d", preset);
+  preset = std::clamp(preset, 0, 6);
+  if (preset != g_crt_preset) Log("crt filter: mode %d", preset);
   g_crt_preset = preset;
 }
 
-bool EnsureCrtShader() {
-  if (!g_crt_ps && !g_crt_failed) {
+bool EnsureCrtShaders() {
+  if (g_crt_failed) return false;
+  if (g_crt_ps[0]) return true;
+  for (int p = 0; p < kCrtPasses; ++p) {
     ID3DBlob *b = nullptr, *e = nullptr;
-    if (SUCCEEDED(D3DCompile(kCrt, sizeof(kCrt) - 1, nullptr, nullptr, nullptr, "ps_crt", "ps_5_0",
-                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &e))) {
-      native::Device()->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_crt_ps);
-      b->Release();
-      g_crt_cb = MakeCB(48);
-      Log("crt filter: shader ready");
-    } else {
-      Log("crt filter: shader failed: %s", e ? static_cast<const char*>(e->GetBufferPointer()) : "?");
+    if (FAILED(D3DCompile(kCrt, sizeof(kCrt) - 1, nullptr, nullptr, nullptr, kCrtEntry[p], "ps_5_0",
+                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &e))) {
+      Log("crt filter: %s failed: %s", kCrtEntry[p], e ? static_cast<const char*>(e->GetBufferPointer()) : "?");
+      SafeRelease(e);
       g_crt_failed = true;
+      return false;
     }
+    native::Device()->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_crt_ps[p]);
+    b->Release();
     SafeRelease(e);
   }
-  return g_crt_ps && g_crt_cb;
+  g_crt_cb = MakeCB(48);
+  D3D11_SAMPLER_DESC sd{};
+  sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+  sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sd.MaxLOD = D3D11_FLOAT32_MAX;
+  native::Device()->CreateSamplerState(&sd, &g_crt_point);
+  Log("crt filter: shaders ready");
+  return g_crt_cb && g_crt_point;
 }
 
-bool EnsureCrtTarget(uint32_t w, uint32_t h) {
-  if (g_crt_srv && g_crt_w == w && g_crt_h == h) return true;
-  SafeRelease(g_crt_srv);
-  SafeRelease(g_crt_rtv);
-  SafeRelease(g_crt_tex);
+bool EnsureCrtTex(CrtTex& t, uint32_t w, uint32_t h, DXGI_FORMAT fmt) {
+  if (t.srv && t.w == w && t.h == h && t.fmt == fmt) return true;
+  SafeRelease(t.srv);
+  SafeRelease(t.rtv);
+  SafeRelease(t.tex);
   D3D11_TEXTURE2D_DESC td{};
   td.Width = w;
   td.Height = h;
   td.MipLevels = td.ArraySize = 1;
-  td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  td.Format = fmt;
   td.SampleDesc.Count = 1;
   td.Usage = D3D11_USAGE_DEFAULT;
   td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-  if (FAILED(native::Device()->CreateTexture2D(&td, nullptr, &g_crt_tex)) ||
-      FAILED(native::Device()->CreateRenderTargetView(g_crt_tex, nullptr, &g_crt_rtv)) ||
-      FAILED(native::Device()->CreateShaderResourceView(g_crt_tex, nullptr, &g_crt_srv))) {
-    SafeRelease(g_crt_srv);
-    SafeRelease(g_crt_rtv);
-    SafeRelease(g_crt_tex);
+  if (FAILED(native::Device()->CreateTexture2D(&td, nullptr, &t.tex)) ||
+      FAILED(native::Device()->CreateRenderTargetView(t.tex, nullptr, &t.rtv)) ||
+      FAILED(native::Device()->CreateShaderResourceView(t.tex, nullptr, &t.srv))) {
+    SafeRelease(t.srv);
+    SafeRelease(t.rtv);
+    SafeRelease(t.tex);
     return false;
   }
-  g_crt_w = w;
-  g_crt_h = h;
+  t.w = w;
+  t.h = h;
+  t.fmt = fmt;
   return true;
+}
+
+// One full-screen pass: inputs a/b, output rtv with viewport vp; s0 = size of input a (or b).
+void CrtPassDraw(int pass, ID3D11ShaderResourceView* a, ID3D11ShaderResourceView* b, float sw, float sh,
+                 ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, float triad, float slot, float lines) {
+  auto* ctx = native::Context();
+  const float cb[12] = {sw, sh, 1.0f / sw, 1.0f / sh, vp.Width, vp.Height, 1.0f / vp.Width, 1.0f / vp.Height,
+                        triad, slot, lines, 0};
+  UpdateCB(g_crt_cb, cb, sizeof(cb));
+  ctx->OMSetRenderTargets(1, &rtv, nullptr);
+  ctx->RSSetViewports(1, &vp);
+  ctx->PSSetShader(g_crt_ps[pass], nullptr, 0);
+  ctx->PSSetConstantBuffers(0, 1, &g_crt_cb);
+  ID3D11ShaderResourceView* srvs[2] = {a, b};
+  ctx->PSSetShaderResources(0, 2, srvs);
+  ctx->Draw(3, 0);
+  ID3D11ShaderResourceView* nul[2] = {};
+  ctx->PSSetShaderResources(0, 2, nul);
 }
 
 // Draws the frame through the CRT filter into the back buffer. Returns false if it cannot.
 bool CrtBlit(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post) {
-  if (!g_blit_vs || !EnsureCrtShader()) return false;
+  if (!g_blit_vs || !EnsureCrtShaders()) return false;
   auto* ctx = native::Context();
-  if (post && EnsureCrtTarget(w, h)) {
+  if (post && EnsureCrtTex(g_crt_t[kTFxaa], w, h, DXGI_FORMAT_R8G8B8A8_UNORM)) {
     const D3D11_VIEWPORT full{0, 0, float(w), float(h), 0, 1};
-    Blit(srv, w, h, post, g_crt_rtv, &full);
-    srv = g_crt_srv;
+    Blit(srv, w, h, post, g_crt_t[kTFxaa].rtv, &full);
+    srv = g_crt_t[kTFxaa].srv;
   }
-  // Cathode's presets: pitch, scanlines, glow, curve, brightness, mask
-  static const float kPreset[4][6] = {{3.0f, 0.38f, 0.30f, 0.22f, 1.15f, 0.72f},   // (unused)
-                                      {3.0f, 0.38f, 0.30f, 0.22f, 1.15f, 0.72f},   // Classic
-                                      {5.0f, 0.62f, 0.65f, 0.42f, 1.30f, 0.94f},   // Arcade
-                                      {2.0f, 0.18f, 0.24f, 0.12f, 1.08f, 0.32f}};  // Soft
-  const float* k = kPreset[g_crt_preset];
+  static const uint32_t kLines[3] = {240, 360, 480};
+  const bool slot = g_crt_preset >= 4;
+  const uint32_t lines = kLines[(g_crt_preset - 1) % 3];
+  const uint32_t nw = std::max<uint32_t>(16, uint32_t(std::lround(double(lines) * w / h)));
   const float bw = float(native::BackBufferWidth()), bh = float(native::BackBufferHeight());
   float vw = bw, vh = bw * float(h) / float(w);
   if (vh > bh) vh = bh, vw = bh * float(w) / float(h);
-  const D3D11_VIEWPORT vp{(bw - vw) * 0.5f, (bh - vh) * 0.5f, vw, vh, 0, 1};
-  // Pitch is in output pixels; Cathode's values suit a window about 1080 pixels high. Rounded to
-  // whole pixels per R/G/B strip, and the grille kept about half as strong as in Cathode (q4hle change), so
-  // the horizontal scanlines dominate. Scanlines: about 360 per screen height (4 px at 1440p).
-  const float scale = std::max(1.0f, vh / 1080.0f);
-  const float pitch = 3.0f * std::max(1.0f, std::round(k[0] * scale / 3.0f));
-  const float line = std::max(3.0f, std::round(vh / 360.0f));
-  const float cb[12] = {vw, vh, pitch, k[1], k[2], k[3], k[4], k[5] * 0.45f, line, 0, 0, 0};
-  ID3D11RenderTargetView* bb = native::BackBufferRTV();
-  ctx->OMSetRenderTargets(1, &bb, nullptr);
-  ctx->RSSetViewports(1, &vp);
+  const uint32_t ow = std::max<uint32_t>(1, uint32_t(vw)), oh = std::max<uint32_t>(1, uint32_t(vh));
+  const DXGI_FORMAT u8 = DXGI_FORMAT_R8G8B8A8_UNORM, f16 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  if (!EnsureCrtTex(g_crt_t[kTBox], nw, lines, u8) || !EnsureCrtTex(g_crt_t[kTSignal], nw, lines, u8) ||
+      !EnsureCrtTex(g_crt_t[kTVBlur], nw, lines, u8) || !EnsureCrtTex(g_crt_t[kTGlowH], nw, lines, f16) ||
+      !EnsureCrtTex(g_crt_t[kTGlow], nw, lines, f16) || !EnsureCrtTex(g_crt_t[kTBeam], ow, oh, f16) ||
+      !EnsureCrtTex(g_crt_t[kTRgb], ow, oh, f16) || !EnsureCrtTex(g_crt_t[kTPostH], ow, oh, f16))
+    return false;
+  const float T = slot ? 3.0f : 4.5f, S = slot ? 1.0f : 0.0f, L = float(lines);
   ctx->RSSetState(nullptr);
   ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
   ctx->OMSetDepthStencilState(nullptr, 0);
@@ -2425,14 +2730,21 @@ bool CrtBlit(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post) {
   ctx->IASetInputLayout(nullptr);
   ctx->VSSetShader(g_blit_vs, nullptr, 0);
   ctx->GSSetShader(nullptr, nullptr, 0);
-  ctx->PSSetShader(g_crt_ps, nullptr, 0);
-  UpdateCB(g_crt_cb, cb, sizeof(cb));
-  ctx->PSSetConstantBuffers(0, 1, &g_crt_cb);
-  ctx->PSSetShaderResources(0, 1, &srv);
-  ctx->PSSetSamplers(0, 1, &g_blit_smp);
-  ctx->Draw(3, 0);
-  ID3D11ShaderResourceView* nul = nullptr;
-  ctx->PSSetShaderResources(0, 1, &nul);
+  ID3D11SamplerState* smp[2] = {g_crt_point, g_blit_smp};
+  ctx->PSSetSamplers(0, 2, smp);
+  const D3D11_VIEWPORT gv{0, 0, float(nw), float(lines), 0, 1};
+  const D3D11_VIEWPORT ov{0, 0, float(ow), float(oh), 0, 1};
+  const float gw = float(nw);
+  CrtPassDraw(kCrtBox, srv, nullptr, float(w), float(h), g_crt_t[kTBox].rtv, gv, T, S, L);
+  CrtPassDraw(kCrtSignal, g_crt_t[kTBox].srv, nullptr, gw, L, g_crt_t[kTSignal].rtv, gv, T, S, L);
+  CrtPassDraw(kCrtVBlur, g_crt_t[kTSignal].srv, nullptr, gw, L, g_crt_t[kTVBlur].rtv, gv, T, S, L);
+  CrtPassDraw(kCrtGlowH, g_crt_t[kTVBlur].srv, nullptr, gw, L, g_crt_t[kTGlowH].rtv, gv, T, S, L);
+  CrtPassDraw(kCrtGlowV, g_crt_t[kTGlowH].srv, nullptr, gw, L, g_crt_t[kTGlow].rtv, gv, T, S, L);
+  CrtPassDraw(kCrtBeam, g_crt_t[kTGlow].srv, g_crt_t[kTVBlur].srv, gw, L, g_crt_t[kTBeam].rtv, ov, T, S, L);
+  CrtPassDraw(kCrtRgb, g_crt_t[kTBeam].srv, nullptr, float(ow), float(oh), g_crt_t[kTRgb].rtv, ov, T, S, L);
+  CrtPassDraw(kCrtPostH, g_crt_t[kTRgb].srv, nullptr, float(ow), float(oh), g_crt_t[kTPostH].rtv, ov, T, S, L);
+  const D3D11_VIEWPORT bv{(bw - vw) * 0.5f, (bh - vh) * 0.5f, float(ow), float(oh), 0, 1};
+  CrtPassDraw(kCrtPostV, g_crt_t[kTPostH].srv, nullptr, float(ow), float(oh), native::BackBufferRTV(), bv, T, S, L);
   InvalidateBindings();
   return true;
 }
@@ -2591,7 +2903,7 @@ void ApplyScaleChange() {
   tex::RefreshSettings();
   RefreshCrtSettings();
   RefreshStereoSettings();
-  const uint32_t want = DesiredScale();
+  const float want = DesiredScale();
   if (want == g_scale) return;
   auto* ctx = native::Context();
   ctx->OMSetRenderTargets(0, nullptr, nullptr);
@@ -2603,7 +2915,7 @@ void ApplyScaleChange() {
   }
   g_rts.clear();
   InvalidateBindings();
-  Log("renderer: internal resolution scale %ux -> %ux", g_scale, want);
+  Log("renderer: internal resolution scale %.3fx -> %.3fx", g_scale, want);
   g_scale = want;
 }
 

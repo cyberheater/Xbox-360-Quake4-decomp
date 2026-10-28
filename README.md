@@ -27,8 +27,11 @@ A new native-renderer build, **`q4hle.exe`**, built alongside `q4.exe` (`-DQ4_HL
 - **GRAPHICS page in the game's own Options menu**: resolution, display mode, V-Sync, anti-aliasing (FXAA),
   texture filtering, FPS counter and **side-by-side stereoscopic 3D** (half / full SBS, three depth
   levels), with an APPLY entry; changes are saved to `q4.toml`
-- **CRT FILTER** (GRAPHICS menu): retro CRT look from Cathode - RGB phosphor grille, scanlines, glow and
-  curved glass (classic / arcade / soft)
+- **CRT FILTER** (GRAPHICS menu): Real CRT Phosphor - the picture drawn only by RGB phosphor stripes with
+  scanline beams (aperture grille or slot mask, 240 / 360 / 480 lines)
+- **More resolutions** in q4hle: 720p, 900p, 1080p, 1440p, 1800p, 2160p and 2880p
+- The mouse pointer hides over the game window
+- Fixed: a crash when one of the game's internal debug checks fired (now ignored, as on a retail Xbox 360)
 - **QUIT GAME** on the title-screen menu
 - Details and all switches: `rexglue-port/docs/hle.md` and `rexglue-port/docs/tickrate.md`
 - Fixed: the view weapon could flicker unlit while the render thread was drawing it
@@ -176,7 +179,9 @@ benchmark of the whole game, and I have not tested a Steam Deck or any Linux bui
 
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) (BSD-3-Clause) and, through it, the
   [Xenia](https://github.com/xenia-project/xenia) project
-- [Cathode](https://github.com/skulitom/CathodeDisplay) by Artem (skulitom) (MIT): the CRT FILTER shader
+- [Real CRT Phosphor](https://github.com/crt2oldgamer-stack/real-crt-phosphor) by gunkun: the CRT FILTER
+  shader, ported to Direct3D 11. Free for non-commercial use with credit; its terms are in
+  `rexglue-port/docs/real-crt-phosphor/`
 - [XenonRecomp / XenosRecomp](https://github.com/hedge-dev) by hedge-dev (used by the legacy runtime)
 - Reference projects studied: UnleashedRecomp, LostOdysseyRecomp, GoldenEye-Recomp, jeff
 

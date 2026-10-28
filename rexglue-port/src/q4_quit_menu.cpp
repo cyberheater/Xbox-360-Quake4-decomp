@@ -296,3 +296,18 @@ extern "C" REX_FUNC(sub_82171718) {
 }
 
 #endif  // Q4QUIT_STANDALONE_TEST
+
+// ---------------------------------------------------------------------------------------------
+// Debug-assert breakpoints. 0x82855158 is the game's import thunk for the kernel's DbgBreakPoint,
+// reached only from the engine's debug asserts (about 37 call sites, e.g. a draw in
+// 0x822DE140 that finds no index data). On a retail Xbox 360 with no debugger attached these do
+// nothing and the game carries on; the SDK's DbgBreakPoint executes a host breakpoint instead,
+// which ends the process. Treat them as on retail: log the call site (first few) and continue.
+extern "C" REX_FUNC(sub_82855158) {
+  (void)base;
+  static int logged = 0;
+  if (logged < 20) {
+    ++logged;
+    std::fprintf(stderr, "q4: guest debug assert ignored (DbgBreakPoint) called from %08X\n", uint32_t(ctx.lr));
+  }
+}

@@ -78,9 +78,10 @@ Texture objects: 0x10-byte resource header followed by the 6-dword texture fetch
 | `Q4_HLE_DUMP_SHADERS=1` | write translated HLSL to `<trace dir>/shaders` |
 | `Q4_HLE_CAPTURE_FRAME=n` | dump the device state of every draw in frame n to `capture.bin` |
 | `Q4_HLE_RT_HEIGHT=n` | height of the native render targets (default 1024) |
-| `Q4_HLE_SCALE=n` | internal resolution scale 1-4 (render targets and resolves at n × the guest size); overrides the GRAPHICS menu's Resolution (`resolution_scale` cvar) |
+| `Q4_HLE_SCALE=n` | internal resolution scale 1-4, fractions allowed (1.5 = 1920x1080; render targets and resolves at n × the guest size); overrides the GRAPHICS menu's Resolution (`q4hle_render_height`, else `resolution_scale`) |
 | `Q4_HLE_STEREO=0/1/2` | overrides the GRAPHICS menu's 3D mode (`q4hle_stereo`: off / half side-by-side / full side-by-side) |
-| `Q4_HLE_CRT=0-3` | overrides the GRAPHICS menu's CRT filter (`q4hle_crt_filter`: off / classic / arcade / soft) |
+| `Q4_HLE_CRT=0-6` | overrides the GRAPHICS menu's CRT filter (`q4hle_crt_filter`) |
+| `Q4_SHOW_CURSOR=1` | keeps the mouse pointer visible over the game window (normally it hides after a second without movement) |
 | `Q4_HLE_FXAA=0/1/2` | overrides the GRAPHICS menu's anti-aliasing (`swap_post_effect`) |
 | `Q4_HLE_SHADOW=1` | keep Xenia's GPU on the window and run the native renderer offscreen alongside (A/B testing) |
 | `Q4_HLE_DUMP_TIMES=t1,t2,…` | at these times (s), write `native_tNNN.bmp` (native frame) and `window_tNNN.bmp` (window contents) |
@@ -211,7 +212,7 @@ MD5R mesh data that entities of one model share (crash in 0x82267CD8). Left in f
 ## GRAPHICS menu
 
 `src/q4_graphics.cpp` adds GRAPHICS to the game's Options menu (patched into guis/mainmenu.gui in
-memory, next to the Quit Game patch). Rows: Resolution (resolution_scale 1-4: 1280x720 x n),
+memory, next to the Quit Game patch). Rows: Resolution (q4hle: `q4hle_render_height` 720/900/1080/1440/1800/2160/2880, a fractional scale of the 1280x720 guest; q4.exe: resolution_scale 1-4: 1280x720 x n),
 Display mode (fullscreen), V-Sync (q4hle_vsync in q4hle, vsync in q4), Anti-aliasing
 (swap_post_effect: FXAA in the native renderer's final blit), Texture filtering
 (anisotropic_override, applied in GetSampler) and FPS counter (q4_show_fps). Changes are staged
@@ -238,11 +239,16 @@ what is behind them.
 
 ## CRT filter
 
-GRAPHICS → CRT FILTER (`q4hle_crt_filter`: 0 off, 1 Classic, 2 Arcade, 3 Soft). The picture
-shader of [Cathode](https://github.com/skulitom/CathodeDisplay) by Artem (skulitom), MIT
-licence, ported to the native renderer's final blit (renderer.cpp "CRT filter"): an RGB
-aperture-grille mask with visible phosphor strips, scanlines, glow, curved glass with a dark
-bezel, and vignette. The three choices are Cathode's presets (pitch, scanlines, glow, curvature,
-brightness, mask). The grille is drawn at the window's pixel size; its pitch grows with windows
-taller than 1080 pixels so the cells stay visible at 1440p and 4K. FXAA, if on, is applied
-before the filter. 3D mode is off while the filter is on. Any refresh rate.
+GRAPHICS → CRT FILTER (`q4hle_crt_filter`: 0 off; 1/2/3 aperture grille with 240/360/480 lines;
+4/5/6 slot mask with 240/360/480 lines). A port of
+[Real CRT Phosphor](https://github.com/crt2oldgamer-stack/real-crt-phosphor) v1.1 by gunkun (free
+for non-commercial use with credit; terms in docs/THIRD_PARTY_NOTICES.md) from its RetroArch slang
+chain to the native renderer (renderer.cpp "CRT filter"), with its "4K PS2" preset values. The
+light comes only from red, green and blue phosphor stripes: the frame is averaged down to the
+chosen number of lines (the original guesses this from the source height; a 720p-or-more 3D game
+needs it set), passed through an analog signal stage (luma/chroma smear, peaking, saturation,
+levels, S-curve) and a glow, drawn as gaussian scanline beams whose width follows brightness, split
+into R/G/B stripes that widen with brightness and melt into glow in highlights (grille pitch 4.5
+px, slot mask 3 px), and softened. Nine passes; the dither and soft passes are off in the preset
+and left out. Best on 1440p or 4K displays, since the stripes need several screen pixels per
+triad. FXAA, if on, is applied first. 3D mode is off while the filter is on.

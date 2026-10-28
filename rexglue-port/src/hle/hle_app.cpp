@@ -52,6 +52,16 @@ class Q4HleApp final : public Q4App {
     q4hle::native::SetWindowProvider([this]() -> void* {
       return window() ? window()->GetNativeWindowHandle() : nullptr;
     });
+    // Hide the mouse pointer over the game window. Auto-hide: it reappears while the mouse moves
+    // (for the F10 menu) and disappears again after a second. Keyboard/mouse mouse-look captures
+    // and hides it as before. Q4_SHOW_CURSOR=1 keeps it visible.
+    if (const char* e = std::getenv("Q4_SHOW_CURSOR"); !(e && *e == '1')) {
+      app_context().CallInUIThreadDeferred([this] {
+        if (!window()) return;
+        window()->SetCursorAutoHideDelayMs(1000);
+        window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
+      });
+    }
     // GRAPHICS menu -> DISPLAY MODE: switch on the UI thread, between frames.
     q4gfx::SetFullscreenHandler([this](bool on) {
       app_context().CallInUIThreadDeferred([this, on] {
