@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 #include <cstring>
 
 #include <rex/cvar.h>
@@ -55,15 +54,9 @@ int ParseHz() {
 #ifdef Q4_HLE
   // Auto: the timing fixes cover 60 and 120 Hz, so pick the one that suits the display.
   // 119/120/144/165/240 Hz displays get 120; 59.94/60/75/100 Hz displays get 60.
-  // The CRT beam simulation (q4hle_crt, GRAPHICS menu) needs several display refreshes per game
-  // frame, so it keeps the game at 60.
   const int display = DisplayHz();
-  std::string crt = rex::cvar::GetFlagByName("q4hle_crt");
-  if (const char* ce = std::getenv("Q4_HLE_CRT"); ce && *ce) crt = ce;
-  const bool crt_on = !crt.empty() && std::atoi(crt.c_str()) > 0;
-  const int hz = display >= 119 && !crt_on ? 120 : 60;
-  std::fprintf(stderr, "q4: display refresh %d Hz -> game rate %d Hz (q4_tickrate = 0, auto%s)\n", display, hz,
-               crt_on ? ", CRT simulation on" : "");
+  const int hz = display >= 119 ? 120 : 60;
+  std::fprintf(stderr, "q4: display refresh %d Hz -> game rate %d Hz (q4_tickrate = 0, auto)\n", display, hz);
   return hz;
 #else
   return 60;  // q4.exe presents at 60 Hz

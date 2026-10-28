@@ -317,28 +317,15 @@ void DumpIfDue() {
 void SetOffscreen(bool on) { g_offscreen = on; }
 bool Offscreen() { return g_offscreen; }
 
-void Present(int forced) {
+void Present() {
   DumpIfDue();
   if (!g_swap) return;
   // The SDK's VdSwap paces the game to its vblank; V-Sync additionally waits for the display's
   // (GRAPHICS menu / q4hle_vsync; Q4_HLE_VSYNC=0/1 overrides).
   const char* e = std::getenv("Q4_HLE_VSYNC");
-  UINT interval = (e && *e) ? (*e == '1' ? 1 : 0) : (REXCVAR_GET(q4hle_vsync) ? 1 : 0);
-  if (forced >= 0) interval = UINT(forced);
+  const UINT interval = (e && *e) ? (*e == '1' ? 1 : 0) : (REXCVAR_GET(q4hle_vsync) ? 1 : 0);
   g_swap->Present(interval, 0);
   FollowWindowSize();
-}
-
-int DisplayRefreshHz() {
-  HMONITOR mon = g_hwnd ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
-  MONITORINFOEXW mi{};
-  mi.cbSize = sizeof(mi);
-  DEVMODEW dm{};
-  dm.dmSize = sizeof(dm);
-  const wchar_t* dev = (mon && GetMonitorInfoW(mon, &mi)) ? mi.szDevice : nullptr;
-  if (EnumDisplaySettingsW(dev, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
-    return int(dm.dmDisplayFrequency);
-  return 0;
 }
 
 }  // namespace q4hle::native

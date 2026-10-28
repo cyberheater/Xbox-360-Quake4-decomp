@@ -29,12 +29,8 @@ ID3D11DeviceContext* Context();
 uint32_t BackBufferWidth();
 uint32_t BackBufferHeight();
 
-// Ends the frame: the renderer has drawn (or not) into the back buffer; present it. interval
-// -1 follows the V-Sync setting; 1 waits for one display refresh (CRT simulation).
-void Present(int interval = -1);
-
-// Refresh rate in Hz of the display the window is on (0 if unknown).
-int DisplayRefreshHz();
+// Ends the frame: the renderer has drawn (or not) into the back buffer; present it.
+void Present();
 
 // Clears the back buffer (used until the guest output is available).
 void ClearBackBuffer(float r, float g, float b);

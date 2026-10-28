@@ -11,7 +11,7 @@
 //   TEXTURE FILTERING  off / 2x / 4x / 8x / 16x anisotropic     (anisotropic_override)
 //   FPS COUNTER        off / on                                 (q4_show_fps)
 //   3D MODE, 3D DEPTH  q4hle only: side-by-side stereo           (q4hle_stereo, q4hle_stereo_depth)
-//   CRT SIMULATION     q4hle only: Blur Busters CRT beam simulator (q4hle_crt)
+//   CRT FILTER         q4hle only: Cathode CRT look                 (q4hle_crt_filter)
 //
 // Changes are made with left/right (or A) and take effect only when APPLY is selected; leaving
 // the page with B discards them. The page talks to the host with console commands, handled here
@@ -58,11 +58,10 @@ REXCVAR_DEFINE_INT32(q4hle_stereo, 0, "GPU",
                      "q4hle: stereoscopic 3D output. 0 = off, 1 = half side-by-side, 2 = full side-by-side");
 REXCVAR_DEFINE_INT32(q4hle_stereo_depth, 2, "GPU", "q4hle: stereoscopic 3D depth strength, 1-3");
 
-// Blur Busters CRT beam simulator in the native renderer (q4hle; see renderer.cpp "CRT beam
-// simulation"). Needs a display of 120 Hz or more; keeps the game at 60 fps.
-REXCVAR_DEFINE_INT32(q4hle_crt, 0, "GPU",
-                     "q4hle: CRT beam simulation for clearer motion on 120 Hz+ displays. 0 = off, "
-                     "1 = soft, 2 = medium, 3 = strong (clearer but dimmer)");
+// CRT look in the native renderer (q4hle; see renderer.cpp "CRT filter", from Cathode).
+REXCVAR_DEFINE_INT32(q4hle_crt_filter, 0, "GPU",
+                     "q4hle: CRT filter (phosphor grille, scanlines, glow, curved glass). 0 = off, "
+                     "1 = classic, 2 = arcade, 3 = soft");
 
 namespace q4gfx {
 namespace {
@@ -107,10 +106,10 @@ const std::vector<Row>& Rows() {
        "Side-by-side 3D for 3D TVs, glasses and VR viewers. HALF SBS suits most 3D TVs.",
        {"OFF", "HALF SBS", "FULL SBS"}},
       {"3D DEPTH", "3D DEPTH", "How strong the 3D effect is.", {"LOW", "MEDIUM", "HIGH"}},
-      {"CRT SIMULATION", "CRT SIMULATION",
-       "Blur Busters CRT beam simulator: clearer motion. Needs a 120 Hz+ display; the game runs at "
-       "60 fps (may need a restart). STRONG: clearer, dimmer.",
-       {"OFF", "SOFT", "MEDIUM", "STRONG"}},
+      {"CRT FILTER", "CRT FILTER",
+       "Retro CRT look: RGB phosphor grille, scanlines, glow and curved glass (from Cathode). "
+       "ARCADE is the strongest, SOFT the gentlest. Turns off 3D mode.",
+       {"OFF", "CLASSIC", "ARCADE", "SOFT"}},
 #endif
   };
   return rows;
@@ -144,7 +143,7 @@ int CurrentChoice(size_t row) {
     case 5: return CvarTrue("q4_show_fps") ? 1 : 0;
     case 6: return std::clamp(CvarInt("q4hle_stereo", 0), 0, 2);
     case 7: return std::clamp(CvarInt("q4hle_stereo_depth", 2), 1, 3) - 1;
-    case 8: return std::clamp(CvarInt("q4hle_crt", 0), 0, 3);
+    case 8: return std::clamp(CvarInt("q4hle_crt_filter", 0), 0, 3);
   }
   return 0;
 }
@@ -172,7 +171,7 @@ void Apply(size_t row, int choice) {
     case 5: rex::cvar::SetFlagByName("q4_show_fps", choice ? "true" : "false"); break;
     case 6: rex::cvar::SetFlagByName("q4hle_stereo", std::to_string(choice)); break;
     case 7: rex::cvar::SetFlagByName("q4hle_stereo_depth", std::to_string(choice + 1)); break;
-    case 8: rex::cvar::SetFlagByName("q4hle_crt", std::to_string(choice)); break;
+    case 8: rex::cvar::SetFlagByName("q4hle_crt_filter", std::to_string(choice)); break;
   }
   std::fprintf(stderr, "q4: graphics: %s = %s\n", rows[row].label, rows[row].choices[choice]);
 }
