@@ -80,6 +80,8 @@ Texture objects: 0x10-byte resource header followed by the 6-dword texture fetch
 | `Q4_HLE_RT_HEIGHT=n` | height of the native render targets (default 1024) |
 | `Q4_HLE_SCALE=n` | internal resolution scale 1-4 (render targets and resolves at n × the guest size); overrides the GRAPHICS menu's Resolution (`resolution_scale` cvar) |
 | `Q4_HLE_STEREO=0/1/2` | overrides the GRAPHICS menu's 3D mode (`q4hle_stereo`: off / half side-by-side / full side-by-side) |
+| `Q4_HLE_CRT=0-3` | overrides the GRAPHICS menu's CRT simulation (`q4hle_crt`: off / soft / medium / strong) |
+| `Q4_HLE_CRT_HZ=<hz>` | testing: the CRT simulation pretends the display runs at this rate |
 | `Q4_HLE_FXAA=0/1/2` | overrides the GRAPHICS menu's anti-aliasing (`swap_post_effect`) |
 | `Q4_HLE_SHADOW=1` | keep Xenia's GPU on the window and run the native renderer offscreen alongside (A/B testing) |
 | `Q4_HLE_DUMP_TIMES=t1,t2,…` | at these times (s), write `native_tNNN.bmp` (native frame) and `window_tNNN.bmp` (window contents) |
@@ -234,3 +236,27 @@ limited to 35% of the maximum parallax. Frames without a 3D scene (menus) are sh
 eyes. FXAA is skipped in 3D mode. Limits: one rendered view (no true per-eye rendering), so edges
 show some stretching where hidden background is revealed; transparent effects take the depth of
 what is behind them.
+
+## CRT beam simulation
+
+GRAPHICS → CRT SIMULATION (`q4hle_crt`: 0 off, 1 soft, 2 medium, 3 strong). This is the
+[Blur Busters CRT Beam Simulator](https://github.com/blurbusters/crt-beam-simulator) by Mark
+Rejhon (Blur Busters) and Timothy Lottes, MIT licence, ported into the final blit (renderer.cpp
+"CRT beam simulation"). On a display faster than the game's frame rate, each game frame is shown
+over several refreshes (2 at 120 Hz, 4 at 240 Hz, 2.4 at 144 Hz) as a rolling electron beam with
+phosphor fade, in linear light, so motion looks much sharper than on a normal sample-and-hold
+display. The renderer keeps the last three game frames and presents one refresh at a time with
+V-Sync, driven by a running refresh counter like the original (including its +0.001 LCD
+anti-retention slew when the ratio is an even whole number). The levels are the original's
+GAIN_VS_BLUR: 0.85, 0.7 (its default) and 0.55; lower is clearer motion but a dimmer picture.
+
+- Needs a display of at least about twice the game's frame rate (120 Hz or more for 60 fps). On
+  a 60 Hz display the setting does nothing.
+- While it is on, the automatic game rate (`q4_tickrate = 0`) is 60 fps instead of 120, so that
+  a 120 Hz display gets two refreshes per frame. The game rate is chosen at start-up, so turning
+  the simulation on while the game runs at 120 takes effect after a restart.
+- Best with the display in SDR, gamma 2.2-2.4, its own strobing/BFI and dynamic brightness off.
+  It flickers by design (like a CRT); if you are sensitive to flicker, leave it off.
+- The frame being scanned is the previous one (as in the original), which adds one game frame
+  of delay. 3D mode is turned off while it is active; FXAA still applies.
+

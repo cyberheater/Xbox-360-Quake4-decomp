@@ -11,6 +11,7 @@
 //   TEXTURE FILTERING  off / 2x / 4x / 8x / 16x anisotropic     (anisotropic_override)
 //   FPS COUNTER        off / on                                 (q4_show_fps)
 //   3D MODE, 3D DEPTH  q4hle only: side-by-side stereo           (q4hle_stereo, q4hle_stereo_depth)
+//   CRT SIMULATION     q4hle only: Blur Busters CRT beam simulator (q4hle_crt)
 //
 // Changes are made with left/right (or A) and take effect only when APPLY is selected; leaving
 // the page with B discards them. The page talks to the host with console commands, handled here
@@ -57,6 +58,12 @@ REXCVAR_DEFINE_INT32(q4hle_stereo, 0, "GPU",
                      "q4hle: stereoscopic 3D output. 0 = off, 1 = half side-by-side, 2 = full side-by-side");
 REXCVAR_DEFINE_INT32(q4hle_stereo_depth, 2, "GPU", "q4hle: stereoscopic 3D depth strength, 1-3");
 
+// Blur Busters CRT beam simulator in the native renderer (q4hle; see renderer.cpp "CRT beam
+// simulation"). Needs a display of 120 Hz or more; keeps the game at 60 fps.
+REXCVAR_DEFINE_INT32(q4hle_crt, 0, "GPU",
+                     "q4hle: CRT beam simulation for clearer motion on 120 Hz+ displays. 0 = off, "
+                     "1 = soft, 2 = medium, 3 = strong (clearer but dimmer)");
+
 namespace q4gfx {
 namespace {
 
@@ -100,6 +107,10 @@ const std::vector<Row>& Rows() {
        "Side-by-side 3D for 3D TVs, glasses and VR viewers. HALF SBS suits most 3D TVs.",
        {"OFF", "HALF SBS", "FULL SBS"}},
       {"3D DEPTH", "3D DEPTH", "How strong the 3D effect is.", {"LOW", "MEDIUM", "HIGH"}},
+      {"CRT SIMULATION", "CRT SIMULATION",
+       "Blur Busters CRT beam simulator: clearer motion. Needs a 120 Hz+ display; the game runs at "
+       "60 fps (may need a restart). STRONG: clearer, dimmer.",
+       {"OFF", "SOFT", "MEDIUM", "STRONG"}},
 #endif
   };
   return rows;
@@ -133,6 +144,7 @@ int CurrentChoice(size_t row) {
     case 5: return CvarTrue("q4_show_fps") ? 1 : 0;
     case 6: return std::clamp(CvarInt("q4hle_stereo", 0), 0, 2);
     case 7: return std::clamp(CvarInt("q4hle_stereo_depth", 2), 1, 3) - 1;
+    case 8: return std::clamp(CvarInt("q4hle_crt", 0), 0, 3);
   }
   return 0;
 }
@@ -160,6 +172,7 @@ void Apply(size_t row, int choice) {
     case 5: rex::cvar::SetFlagByName("q4_show_fps", choice ? "true" : "false"); break;
     case 6: rex::cvar::SetFlagByName("q4hle_stereo", std::to_string(choice)); break;
     case 7: rex::cvar::SetFlagByName("q4hle_stereo_depth", std::to_string(choice + 1)); break;
+    case 8: rex::cvar::SetFlagByName("q4hle_crt", std::to_string(choice)); break;
   }
   std::fprintf(stderr, "q4: graphics: %s = %s\n", rows[row].label, rows[row].choices[choice]);
 }
@@ -257,9 +270,9 @@ void EmitStep(Out& o, size_t r, int dir) {
 }
 
 #ifdef Q4_HLE
-constexpr int kRowY0 = 140, kRowDy = 28;  // eight settings
+constexpr int kRowY0 = 132, kRowDy = 25, kRowH = 28;  // nine settings
 #else
-constexpr int kRowY0 = 178, kRowDy = 29;
+constexpr int kRowY0 = 178, kRowDy = 29, kRowH = 31;
 #endif
 // Entries 0..rows-1 are the settings; entry `rows` is APPLY, a little lower.
 int RowY(size_t r) { return kRowY0 + int(r) * kRowDy + (r >= Rows().size() ? 8 : 0); }
@@ -287,7 +300,7 @@ std::string BuildPage() {
   for (size_t r = 0; r < Entries(); ++r) {
     const int y = RowY(r);
     o.Open("windowDef gfx_c" + N(r + 1));
-    o.L("rect\t47," + std::to_string(y + 14) + ",18,18");
+    o.L("rect\t47," + std::to_string(y + kRowH - 17) + ",18,18");
     o.L("visible\t1");
     o.L("background\t\"gfx/guis/mainmenu/corner\"");
     o.L("matscalex\t-1");
@@ -303,7 +316,7 @@ std::string BuildPage() {
     const std::string title = apply ? "APPLY" : rows[r].title;
     const std::string desc = apply ? "Applies the changes made above. Press B to leave without applying them." : rows[r].desc;
     o.Open("windowDef " + btn);
-    o.L("rect\t50," + std::to_string(y) + ",236,31");
+    o.L("rect\t50," + std::to_string(y) + ",236," + std::to_string(kRowH));
     o.L("visible\t1");
     o.L("background\t\"gfx/guis/mainmenu/b6_light\"");
     o.L("matcolor\t0.545,0.588,0.294,0.4");

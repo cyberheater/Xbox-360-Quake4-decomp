@@ -46,6 +46,7 @@
 #include "hle/log.h"
 #include "hle/native.h"
 #include "hle/textures.h"
+#include "hle/tickrate.h"
 #include "hle/trace.h"
 #include "hle/xenos_hlsl.h"
 
@@ -401,6 +402,12 @@ RenderTarget* g_st_rt = nullptr;
 RenderTarget* g_st_depth_rt = nullptr;
 float g_depth_clear = 1.0f;  // last depth clear value (1: near is small depth; 0: reversed)
 void RefreshStereoSettings();
+
+// CRT beam simulation state (see "CRT beam simulation" below).
+int g_crt_level = 0;        // q4hle_crt: 0 off, 1 soft, 2 medium, 3 strong
+bool g_crt_active = false;  // on, and the display has at least ~2 refreshes per game frame
+double g_crt_fph = 0.0;     // display refreshes per game frame (FRAMES_PER_HZ)
+void RefreshCrtSettings();
 
 // Q4_HLE_SCALE (1-4) if set, else the resolution_scale cvar (GRAPHICS menu). Changes of the cvar
 // apply between frames (ApplyScaleChange).
@@ -924,6 +931,7 @@ bool Init() {
   if (const char* h = std::getenv("Q4_HLE_RT_HEIGHT")) g_rt_height = std::max(64, std::atoi(h));
   g_scale = DesiredScale();
   tex::RefreshSettings();
+  RefreshCrtSettings();
   RefreshStereoSettings();
   Log("renderer: internal resolution scale %ux", g_scale);
   OutDir();
@@ -2005,7 +2013,10 @@ int PostEffect(uint64_t frame) {
   return g_post_mode;
 }
 
-void Blit(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post) {
+// Draws srv into the back buffer, letterboxed (or into `target` with viewport `tvp`), optionally
+// through FXAA.
+void Blit(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post,
+          ID3D11RenderTargetView* target = nullptr, const D3D11_VIEWPORT* tvp = nullptr) {
   auto* ctx = native::Context();
   if (!g_blit_vs) {
     ID3DBlob *b = nullptr, *e = nullptr;
@@ -2046,13 +2057,14 @@ void Blit(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post) {
     UpdateCB(g_fxaa_cb, cb, sizeof(cb));
     ctx->PSSetConstantBuffers(0, 1, &g_fxaa_cb);
   }
-  ID3D11RenderTargetView* bb = native::BackBufferRTV();
+  ID3D11RenderTargetView* bb = target ? target : native::BackBufferRTV();
   ctx->OMSetRenderTargets(1, &bb, nullptr);
   const float bw = float(native::BackBufferWidth()), bh = float(native::BackBufferHeight());
   // letterbox to the source aspect ratio
   float vw = bw, vh = bw * float(h) / float(w);
   if (vh > bh) vh = bh, vw = bh * float(w) / float(h);
   D3D11_VIEWPORT vp{(bw - vw) * 0.5f, (bh - vh) * 0.5f, vw, vh, 0, 1};
+  if (tvp) vp = *tvp;
   ctx->RSSetViewports(1, &vp);
   ctx->RSSetState(nullptr);
   ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
@@ -2101,6 +2113,7 @@ void RefreshStereoSettings() {
   g_stereo_mode = std::clamp(get("q4hle_stereo", 0), 0, 2);
   g_stereo_depth = std::clamp(get("q4hle_stereo_depth", 2), 1, 3);
   if (const char* e = std::getenv("Q4_HLE_STEREO"); e && *e) g_stereo_mode = std::clamp(std::atoi(e), 0, 2);
+  if (g_crt_active) g_stereo_mode = 0;  // the CRT simulation takes the whole picture
 }
 
 bool CopyToSnap(SnapTex& st, RenderTarget* rt) {
@@ -2263,6 +2276,182 @@ bool StereoBlit(ID3D11ShaderResourceView* final_srv, uint32_t w, uint32_t h) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// CRT beam simulation: the Blur Busters CRT Beam Simulator (Mark Rejhon @BlurBusters and Timothy
+// Lottes @NOTimothyLottes, MIT licence, https://github.com/blurbusters/crt-beam-simulator; see
+// docs/THIRD_PARTY_NOTICES.md). Each game frame is shown over the several refreshes a fast
+// display gives it (2 at 120 Hz for a 60 fps game, 4 at 240 Hz): a simulated electron beam rolls
+// down the screen, lighting each line brightly for a short time and leaving it dark (with a
+// phosphor fade) for the rest, which makes motion much clearer than a sample-and-hold display.
+// Brighter pixels are spread over more refreshes, in linear light, so the picture stays smooth.
+//
+// The renderer keeps the last three game frames, then presents one refresh at a time with V-Sync,
+// using a running refresh counter as the original does (FRAMES_PER_HZ = display Hz / game Hz,
+// any ratio of 2 or more; +0.001 when it is an even whole number, the original's LCD
+// anti-retention slew). As in the original, the frame being scanned is the previous one, so it
+// adds one game frame of delay. q4hle_crt: 0 off, 1 soft (gain 0.85), 2 medium (0.7, the
+// original's default), 3 strong (0.55: clearer motion, dimmer). Q4_HLE_CRT=0-3 overrides;
+// Q4_HLE_CRT_HZ pretends the display runs at that rate (testing). Inactive
+// when the display has fewer than about two refreshes per game frame.
+const char kCrt[] = R"(
+Texture2D<float4> tCur : register(t0);
+Texture2D<float4> tPrev1 : register(t1);
+Texture2D<float4> tPrev2 : register(t2);
+SamplerState s : register(s0);
+// c.x = beam position this refresh (0..1), c.y = refreshes per frame, c.z = gain vs blur
+cbuffer CrtCB : register(b0) { float4 c; };
+struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+float3 S2L(float3 v) { v = saturate(v); return v > 0.04045 ? pow(v / 1.055 + 0.055 / 1.055, 2.4) : v / 12.92; }
+float3 L2S(float3 v) { v = saturate(v); return v > 0.0031308 ? 1.055 * pow(v, 1.0 / 2.4) - 0.055 : v * 12.92; }
+float3 Overlap(float a0, float3 a1, float b0, float b1) { return max(0.0, min(a1, b1) - max(a0, b0)); }
+float4 ps_crt(V i) : SV_Target {
+  const float F = c.y, scale = F * c.z;
+  const float3 p2 = S2L(tPrev2.SampleLevel(s, i.uv, 0).rgb) * scale;
+  const float3 p1 = S2L(tPrev1.SampleLevel(s, i.uv, 0).rgb) * scale;
+  const float3 cu = S2L(tCur.SampleLevel(s, i.uv, 0).rgb) * scale;
+  const float tubeFrame = i.uv.y * F;  // the beam scans top to bottom
+  const float fStart = c.x * F, fEnd = fStart + 1.0;
+  const float s2 = tubeFrame - F, s1 = tubeFrame, sc = tubeFrame + F;
+  const float3 r = Overlap(s2, s2 + p2, fStart, fEnd) + Overlap(s1, s1 + p1, fStart, fEnd) +
+                   Overlap(sc, sc + cu, fStart, fEnd);
+  return float4(L2S(r), 1);
+}
+)";
+ID3D11PixelShader* g_crt_ps = nullptr;
+ID3D11Buffer* g_crt_cb = nullptr;
+bool g_crt_failed = false;
+struct CrtFrame {
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+};
+CrtFrame g_crt_hist[3];
+uint32_t g_crt_w = 0, g_crt_h = 0;
+uint64_t g_crt_frame = 0;    // game frames given to the simulation (its "Hz counter")
+uint64_t g_crt_refresh = 0;  // display refreshes presented by it
+double g_crt_eff = 0.0;      // FRAMES_PER_HZ in use, with the anti-retention slew
+bool g_crt_sync = true;      // restart the refresh counter at the next frame
+
+void RefreshCrtSettings() {
+  const std::string v = rex::cvar::GetFlagByName("q4hle_crt");
+  int level = v.empty() ? 0 : std::atoi(v.c_str());
+  if (const char* e = std::getenv("Q4_HLE_CRT"); e && *e) level = std::atoi(e);
+  level = std::clamp(level, 0, 3);
+  int display = native::DisplayRefreshHz();
+  if (const char* e = std::getenv("Q4_HLE_CRT_HZ"); e && *e) display = std::atoi(e);  // testing: pretend
+  const int game = std::max(1, q4hle::tick::Hz());
+  double fph = display > 0 ? double(display) / double(game) : 0.0;
+  if (std::fabs(fph - std::round(fph)) < 0.05) fph = std::round(fph);  // 119 Hz / 60 -> 2
+  const bool active = level > 0 && fph >= 1.9;
+  if (level != g_crt_level || active != g_crt_active || fph != g_crt_fph) {
+    if (level > 0)
+      Log("crt: level %d, display %d Hz, game %d Hz: %.3f refreshes per frame -> %s", level, display, game, fph,
+          active ? "on" : "off (needs a display of at least twice the game's frame rate)");
+    g_crt_sync = true;
+  }
+  g_crt_level = level;
+  g_crt_active = active;
+  g_crt_fph = fph;
+}
+
+bool EnsureCrt(uint32_t w, uint32_t h) {
+  if (!g_crt_ps && !g_crt_failed) {
+    ID3DBlob *b = nullptr, *e = nullptr;
+    if (SUCCEEDED(D3DCompile(kCrt, sizeof(kCrt) - 1, nullptr, nullptr, nullptr, "ps_crt", "ps_5_0",
+                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &e))) {
+      native::Device()->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_crt_ps);
+      b->Release();
+      g_crt_cb = MakeCB(16);
+      Log("crt: shader ready");
+    } else {
+      Log("crt: shader failed: %s", e ? static_cast<const char*>(e->GetBufferPointer()) : "?");
+      g_crt_failed = true;
+    }
+    SafeRelease(e);
+  }
+  if (!g_crt_ps || !g_crt_cb) return false;
+  if (g_crt_w == w && g_crt_h == h && g_crt_hist[0].srv) return true;
+  for (auto& f : g_crt_hist) {
+    SafeRelease(f.srv);
+    SafeRelease(f.rtv);
+    SafeRelease(f.tex);
+  }
+  D3D11_TEXTURE2D_DESC td{};
+  td.Width = w;
+  td.Height = h;
+  td.MipLevels = td.ArraySize = 1;
+  td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  td.SampleDesc.Count = 1;
+  td.Usage = D3D11_USAGE_DEFAULT;
+  td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  const float black[4] = {0, 0, 0, 1};
+  for (auto& f : g_crt_hist) {
+    if (FAILED(native::Device()->CreateTexture2D(&td, nullptr, &f.tex)) ||
+        FAILED(native::Device()->CreateRenderTargetView(f.tex, nullptr, &f.rtv)) ||
+        FAILED(native::Device()->CreateShaderResourceView(f.tex, nullptr, &f.srv))) {
+      Log("crt: could not create %ux%u frame history", w, h);
+      g_crt_failed = true;
+      return false;
+    }
+    native::Context()->ClearRenderTargetView(f.rtv, black);
+  }
+  g_crt_w = w;
+  g_crt_h = h;
+  return true;
+}
+
+// Takes the new game frame and presents the refreshes that belong to it. Returns false (nothing
+// presented) if the simulation cannot run, so the caller presents normally.
+bool CrtPresent(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, int post) {
+  if (!g_blit_vs || !EnsureCrt(w, h)) return false;
+  auto* ctx = native::Context();
+  const uint64_t H = ++g_crt_frame;
+  CrtFrame& cur = g_crt_hist[H % 3];
+  const D3D11_VIEWPORT full{0, 0, float(w), float(h), 0, 1};
+  Blit(srv, w, h, post, cur.rtv, &full);  // FXAA, if on, is applied to the stored frame
+  const double F = g_crt_fph;
+  const double eff = (std::fmod(F, 2.0) == 0.0) ? F + 0.001 : F;  // LCD anti-retention slew
+  if (g_crt_sync || eff != g_crt_eff) {
+    g_crt_eff = eff;
+    g_crt_refresh = uint64_t(std::ceil(double(H) * eff));
+    g_crt_sync = false;
+  }
+  // refreshes that are behind (a slow frame): skip to this frame's first one
+  if (uint64_t(std::floor(double(g_crt_refresh) / eff)) < H) g_crt_refresh = uint64_t(std::ceil(double(H) * eff));
+  const float bw = float(native::BackBufferWidth()), bh = float(native::BackBufferHeight());
+  float vw = bw, vh = bw * float(h) / float(w);
+  if (vh > bh) vh = bh, vw = bh * float(w) / float(h);
+  const D3D11_VIEWPORT vp{(bw - vw) * 0.5f, (bh - vh) * 0.5f, vw, vh, 0, 1};
+  static const float kGain[4] = {0.7f, 0.85f, 0.7f, 0.55f};
+  ID3D11ShaderResourceView* srvs[3] = {cur.srv, g_crt_hist[(H + 2) % 3].srv, g_crt_hist[(H + 1) % 3].srv};
+  for (int n = 0; n < 16 && uint64_t(std::floor(double(g_crt_refresh) / eff)) == H; ++n, ++g_crt_refresh) {
+    const double r = double(g_crt_refresh);
+    const float cb[4] = {float(std::fmod(r, eff) / eff), float(eff), kGain[g_crt_level], 0};
+    native::ClearBackBuffer(0, 0, 0);
+    ID3D11RenderTargetView* bb = native::BackBufferRTV();
+    ctx->OMSetRenderTargets(1, &bb, nullptr);
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(nullptr);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(nullptr);
+    ctx->VSSetShader(g_blit_vs, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->PSSetShader(g_crt_ps, nullptr, 0);
+    UpdateCB(g_crt_cb, cb, sizeof(cb));
+    ctx->PSSetConstantBuffers(0, 1, &g_crt_cb);
+    ctx->PSSetShaderResources(0, 3, srvs);
+    ctx->PSSetSamplers(0, 1, &g_blit_smp);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* nul[3] = {};
+    ctx->PSSetShaderResources(0, 3, nul);
+    native::Present(1);  // one display refresh each
+  }
+  InvalidateBindings();
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Hooks
 template <uint32_t Addr>
 void CallHook(PPCContext& __restrict ctx, uint8_t* base, GuestFn original) {
@@ -2414,6 +2603,7 @@ void GpuFrameBoundary() {
 void ApplyScaleChange() {
   if (g_frame % 30 != 0) return;  // settings are polled, not pushed
   tex::RefreshSettings();
+  RefreshCrtSettings();
   RefreshStereoSettings();
   const uint32_t want = DesiredScale();
   if (want == g_scale) return;
@@ -2442,9 +2632,13 @@ void ExecuteEndFrame(Cmd& cmd) {
     srv = tex::FindResolved(f.base, &w, &h);
   }
   if (g_stereo_mode && g_st_pending) StereoSnapshot();  // the 3D scene was the last thing drawn
+  bool presented = false;  // by the CRT simulation, one refresh at a time
   if (srv && w && h) {
-    native::ClearBackBuffer(0, 0, 0);
-    if (!g_stereo_mode || !g_blit_vs || !StereoBlit(srv, w, h)) Blit(srv, w, h, g_stereo_mode ? 0 : PostEffect(g_frame));
+    if (g_crt_active && g_blit_vs) presented = CrtPresent(srv, w, h, PostEffect(g_frame));
+    if (!presented) {
+      native::ClearBackBuffer(0, 0, 0);
+      if (!g_stereo_mode || !g_blit_vs || !StereoBlit(srv, w, h)) Blit(srv, w, h, g_stereo_mode ? 0 : PostEffect(g_frame));
+    }
   } else {
     native::ClearBackBuffer(0.3f, 0.0f, 0.3f);  // magenta-ish: no front buffer resolved
   }
@@ -2473,7 +2667,8 @@ void ExecuteEndFrame(Cmd& cmd) {
     g_gpu_ms_count = 0;
     g_cap_prof = 0;
   }
-  native::Present();
+  if (!presented) native::Present();
+  if (!presented && g_crt_active) g_crt_sync = true;
   g_st_have = g_st_pending = false;
   g_st_rt = g_st_depth_rt = nullptr;
   ApplyScaleChange();

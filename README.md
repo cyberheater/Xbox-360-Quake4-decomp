@@ -27,6 +27,8 @@ A new native-renderer build, **`q4hle.exe`**, built alongside `q4.exe` (`-DQ4_HL
 - **GRAPHICS page in the game's own Options menu**: resolution, display mode, V-Sync, anti-aliasing (FXAA),
   texture filtering, FPS counter and **side-by-side stereoscopic 3D** (half / full SBS, three depth
   levels), with an APPLY entry; changes are saved to `q4.toml`
+- **CRT SIMULATION** (GRAPHICS menu): the Blur Busters CRT beam simulator for much clearer motion on
+  120 Hz+ displays (soft / medium / strong)
 - **QUIT GAME** on the title-screen menu
 - Details and all switches: `rexglue-port/docs/hle.md` and `rexglue-port/docs/tickrate.md`
 - Fixed: the view weapon could flicker unlit while the render thread was drawing it
@@ -174,6 +176,8 @@ benchmark of the whole game, and I have not tested a Steam Deck or any Linux bui
 
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) (BSD-3-Clause) and, through it, the
   [Xenia](https://github.com/xenia-project/xenia) project
+- [Blur Busters CRT Beam Simulator](https://github.com/blurbusters/crt-beam-simulator) by Mark Rejhon
+  (Blur Busters) and Timothy Lottes (MIT), used for CRT SIMULATION
 - [XenonRecomp / XenosRecomp](https://github.com/hedge-dev) by hedge-dev (used by the legacy runtime)
 - Reference projects studied: UnleashedRecomp, LostOdysseyRecomp, GoldenEye-Recomp, jeff
 
